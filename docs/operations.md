@@ -89,20 +89,42 @@ GATEWAY_URL=http://127.0.0.1:8080 ./sysadmin-chat
 ```
 
 The CLI talks to Traefik at `GATEWAY_URL` using the bearer key for
-`SYSADMIN_USER`.
+`SYSADMIN_USER`. ReAct reasoning streams live (Server-Sent Events) by default;
+toggle it with `/stream off`. `Ctrl+C` during a query cancels the in-flight
+request without exiting; a second `Ctrl+C` (or `/exit`) quits.
 
 | Command | Action |
 |---|---|
+| `/users` | List provisioned identities. |
+| `/user ID` / `/whoami` | Switch identity / show current identity and role. |
+| `/sessions` | List this user's sessions. |
+| `/session ID` / `/session rm ID` | Continue / delete a session. |
+| `/new` | Start a fresh session. |
 | `/tools` | List registered tools. |
-| `/status` | Run `./platform.sh status`. |
+| `/status` / `/logs [service]` | Run `./platform.sh status` / tail logs. |
+| `/health` | Check gateway and service health. |
 | `/approvals` | List pending approvals (admin). |
 | `/approve ID` / `/reject ID` | Decide an approval (admin). |
 | `/resume ID` | Execute the approved command once (requester). |
+| `/p1 status\|elevate <incident>\|revoke` | P1 elevation controls. |
 | `/help` / `/exit` | Help / quit. |
 
 Any other input is sent to the ReAct agent. When a command needs approval the
 CLI prints the approval id; an administrator reviews it with
 `/approvals` + `/approve ID`, then the requester runs `/resume ID`.
+
+The same operations are available as non-interactive subcommands for scripting:
+
+```bash
+./sysadmin-chat chat "search for connect errors in nginx logs" --stream
+./sysadmin-chat chat "summarize the outage" --json --user sysadmin-admin
+./sysadmin-chat tools
+./sysadmin-chat users
+./sysadmin-chat sessions --delete <id>
+./sysadmin-chat approvals
+./sysadmin-chat decide <id> --approve --user sysadmin-admin
+./sysadmin-chat health
+```
 
 ### Approval workflow across identities
 

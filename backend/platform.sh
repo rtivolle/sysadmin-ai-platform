@@ -461,7 +461,7 @@ case "${1:-status}" in
     "$VENV_PYTHON" "${ROOT_DIR}/services/hardware_survey.py"
     ;;
   chat)
-    "$VENV_PYTHON" "${ROOT_DIR}/sysadmin_cli.py"
+    "$VENV_PYTHON" "${ROOT_DIR}/sysadmin_cli.py" "${@:2}"
     ;;
   harness)
     start_harness
