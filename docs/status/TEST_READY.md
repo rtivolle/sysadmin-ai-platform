@@ -5,6 +5,7 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
 | Check | Result | Scope |
 |---|---:|---|
 | Full backend suite against the live local stack (2026-09-24) | 356 passed, 0 failed, 0 skipped | `backend/.venv/bin/python3 -m pytest -q` with Valkey, VictoriaLogs, SeaweedFS, inference, ForwardAuth, Traefik, and the agent platform reachable |
+| Full backend suite including the M4 adversarial challenger pack (services stopped) | 430 passed, 6 skipped | The six skips are the live ForwardAuth/Traefik checks in `tier3_concurrency/test_empirical_challenger.py`, which need running services; `tier2_sandbox/test_m4_empirical_challenger.py` adds 80 independent challenge cases |
 | Tier 2 sandbox suite on this host | 49 passed | Bubblewrap and delegated cgroups v2 are available here, so isolation, deadline, and cgroup-ceiling checks executed instead of skipping |
 | Live concurrency-lease lifecycle against Valkey | Passed | Two leases admitted, a third rejected with the 2/2 ceiling, lease renewal accepted, both releases returned the user and cluster lease sets to zero, and re-admission succeeded immediately |
 | Daily token reservation and settlement | 8 passed (6 process-local, 2 against live Valkey) | Atomic admission, duplicate-ID rejection, exactly-once settlement, capacity release, and fail-closed behaviour when the shared store is required but unreachable |

@@ -127,10 +127,13 @@ per-user bearer keys from those files.
 | Harness package | `make harness-test && make harness-verify` |
 | Anything user-visible | update `docs/` and record results in `docs/status/TEST_READY.md` |
 
-Baseline on the development host (2026-09-24, live stack):
-**356 passed, 0 failed, 0 skipped**; tier 2 sandbox **49 passed**; harness
-**19 node tests + 7/7 dsh checks**. Treat these as a regression baseline, not
-as a production acceptance certificate.
+Baseline on the development host (2026-09-24): full suite **430 passed, 6
+skipped** with services stopped — the six skips are live ForwardAuth/Traefik
+checks that pass when the stack is up (**436 passed** with services running);
+tier 2 sandbox **129 passed** (including the 80-case M4 challenger pack);
+harness **19 node tests + 7/7 dsh checks**. Treat these as a regression
+baseline, not a production acceptance certificate, and record new measurements
+in `docs/status/TEST_READY.md`.
 
 ## 7. Environment notes
 
