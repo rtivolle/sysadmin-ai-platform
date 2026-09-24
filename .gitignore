@@ -9,15 +9,12 @@ backend/.venv/
 backend/bin/
 backend/run/
 backend/logs/
-backend/data/valkey/
-backend/data/seaweedfs/
-backend/data/victorialogs/
-backend/data/workspaces/
-backend/data/hardware_inventory.json
-backend/data/hardware_inventory.md
+# Everything under data/ is runtime state except the tracked runbooks, so a new
+# runtime file dropped directly in data/ cannot leak into a commit.
+backend/data/*
+!backend/data/runbooks/
 
 # Generated logs and large test fixtures
-backend/data/logs/
 backend/tests/fixtures/logs/massive_access_5gb.log
 
 # Provisioned secrets
