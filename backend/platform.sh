@@ -222,7 +222,15 @@ run_tests() {
     echo "Services not running. Starting all backend services for testing..."
     start_all
     auto_started=true
-    sleep 2
+    sleep 4
+    for port in 6379 9428 8333 8000 3081 3080 4000 8080; do
+      for _ in $(seq 1 10); do
+        if "$VENV_PYTHON" -c "import socket; s = socket.socket(); s.settimeout(0.5); exit(s.connect_ex(('127.0.0.1', $port)))" 2>/dev/null; then
+          break
+        fi
+        sleep 0.5
+      done
+    done
   fi
 
   echo "Running end-to-end backend verification test suite..."
