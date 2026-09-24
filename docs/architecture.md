@@ -174,9 +174,10 @@ availability; see [backup-restore.md](backup-restore.md).
 
 ## 7. Resource model
 
-- **Sandbox**: `memory.max = 4 GiB`, `pids.max = 128`, `cpu.max = 200000 100000`
-  (200 % of one CPU), 15 s wall clock then SIGKILL after a 5 s grace period, no
-  network, read-only host mounts.
+- **Sandbox**: `memory.max = 4 GiB` with `memory.swap.max = 0` (the 4 GiB
+  bound covers total memory, not just RSS), `pids.max = 128`,
+  `cpu.max = 200000 100000` (200 % of one CPU), 15 s wall clock then SIGKILL
+  after a 5 s grace period, no network, read-only host mounts.
 - **Per-user model calls**: 2 in flight (6 during P1), 60 RPM / 200 RPM,
   150,000 / 500,000 TPM, 2,000,000 / 10,000,000 tokens per day.
 - **Cluster admission**: 8 slots (10 during P1) when

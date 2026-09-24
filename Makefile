@@ -6,7 +6,7 @@ NODE  := node
 .DEFAULT_GOAL := help
 .PHONY: help install start stop restart status logs chat test test-unit test-sandbox \
         test-concurrency test-recovery test-live benchmark harness-test harness-verify \
-        compile clean-cache
+        stress-sandbox compile clean-cache
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -58,6 +58,9 @@ harness-test: ## Harness package unit tests
 
 harness-verify: ## Boot the real dsh profile and verify the wiring
 	$(NODE) packages/harness-integration/scripts/verify-harness.mjs
+
+stress-sandbox: ## Kernel-backed sandbox stress qualification (memory/pids/CPU/deadline/network)
+	backend/tests/qualification/sandbox_stress.sh
 
 compile: ## Byte-compile backend sources and tests
 	$(PY) -m compileall -q backend/services backend/tests && echo "compile OK"

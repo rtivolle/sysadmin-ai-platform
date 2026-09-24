@@ -77,9 +77,14 @@ Controls:
   host `/usr` is mounted read-only, `/proc`, `/dev` and a tmpfs `/tmp` are
   provided, and all capabilities are dropped (`--cap-drop ALL`).
 - **Resource envelope** — either `systemd-run --user --scope` with
-  `MemoryMax=4G`, `TasksMax=128`, `CPUQuota=200%` when available, or a
-  manually created cgroup v2 subtree with `memory.max=4294967296`,
-  `pids.max=128` and `cpu.max=200000 100000`.
+  `MemoryMax=4G`, `MemorySwapMax=0`, `TasksMax=128`, `CPUQuota=200%`
+  when available, or a manually created cgroup v2 subtree with
+  `memory.max=4294967296`, `memory.swap.max=0`, `pids.max=128` and
+  `cpu.max=200000 100000`. The zero swap cap is required: `memory.max`
+  alone lets the kernel swap anonymous pages out at the ceiling instead of
+  OOM-killing, so total memory grows past the envelope on any swap-enabled
+  host (measured: RSS pinned at 4 GiB while swap usage climbed past 1 GiB
+  and a 6 GiB allocation survived).
 - **Deadline** — `timeout --kill-after=5s 15s` around Bubblewrap.
 - **Fail closed** — if the cgroup limits cannot be installed **and read back**
   exactly, or cgroups v2 is unavailable, the runner aborts before executing the
@@ -166,7 +171,7 @@ as untrusted data.
 | Threat | Control | Status |
 |---|---|---|
 | Privilege escalation from agent shell | Bubblewrap namespaces, cap-drop, no network, read-only host | Implemented; host qualification pending |
-| Resource exhaustion (fork bomb, OOM) | cgroup `pids.max`/`memory.max`/`cpu.max`, fail closed | Implemented; kernel stress run pending |
+| Resource exhaustion (fork bomb, OOM) | cgroup `pids.max`/`memory.max` + `memory.swap.max=0`/`cpu.max`, fail closed | Implemented; kernel stress-qualified on the `systemd-run` leg ([testing.md](testing.md)); raw-delegation leg verified fail-closed when the subtree is not delegated |
 | Destructive command | Python + JS command filter | Implemented and unit-tested |
 | Unauthorised mutation | Human approval bound to exact request, single-use CAS | Implemented and tested |
 | Identity spoofing | Header stripping + credential re-validation at each layer | Implemented and tested |

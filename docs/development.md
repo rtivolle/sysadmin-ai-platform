@@ -50,6 +50,10 @@ sysadmin-chat                 CLI launcher
   verification results in `docs/status/TEST_READY.md`.
 - **Agents** — read [`../AGENTS.md`](../AGENTS.md) before changing anything; it
   carries the golden commands, the guardrail list and the per-change test matrix.
+- **Multiple agents** — when more than one agent is active, follow
+  [`../AGENTS.md`](../AGENTS.md) §8: own one scoped change, start from a clean
+  tree, do not commit or reset history without explicit approval, and stop to
+  ask when conflicts involve guardrails, secrets or the verification baseline.
 
 ## 3. Common tasks
 

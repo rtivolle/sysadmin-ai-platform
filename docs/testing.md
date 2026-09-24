@@ -13,6 +13,7 @@ Harness integration. `pytest.ini` sets `pythonpath = . backend`,
 | Tier 3 — concurrency | `backend/tests/tier3_concurrency/` | Approval lifecycle/binding/HTTP, concurrency ceiling, rate limits, P1 elevation, adversarial challengers, read-only slice stress. |
 | Tier 4 — recovery | `backend/tests/tier4_recovery/` | Outbox resilience, DR drill, restore, adversarial P1/DR cases. |
 | End-to-end | `backend/tests/e2e/test_30_tasks.py` | Synthetic 30-task pack (log, config, runbook). |
+| Stress qualification | `backend/tests/qualification/sandbox_stress.sh` | Kernel-backed stress run of the sandbox: real OOM kill at the 4 GiB ceiling, 128-task ceiling, 2-CPU throttling, 15 s deadline, live network denial, filesystem confinement. Not a pytest suite; run on the target host. |
 
 Approximate test-function counts in the current tree:
 
@@ -44,6 +45,9 @@ backend/.venv/bin/python3 -m pytest backend/tests/e2e/test_30_tasks.py -q
 
 # Sandbox suite (host prerequisites required)
 backend/.venv/bin/python3 -m pytest backend/tests/tier2_sandbox -q
+
+# Kernel-backed sandbox stress qualification (host prerequisites required)
+make stress-sandbox
 
 # Harness integration
 cd packages/harness-integration && node --test tests/
@@ -96,15 +100,23 @@ historical restricted-workspace run; the current host results are in that file:
 - **5 blocked** socket tests need a host that permits loopback binding.
 - Tier 2 sandbox tests skip when host prerequisites are missing; a separate
   runner check verifies commands fail closed instead of running unbounded.
-- The live smoke test did **not** prove the 4 GiB / 128-process / 200-% CPU
-  limits on a production host.
+- The kernel-backed stress run (`make stress-sandbox`) now proves the
+  4 GiB total-memory ceiling (with `memory.swap.max=0`), the 128-task
+  ceiling, 2-CPU throttling, the 15 s deadline, live network denial and
+  filesystem confinement on the runner's `systemd-run` leg. The raw
+  cgroup-delegation leg is verified fail-closed (abort 126 before executing)
+  when the session has no delegated writable subtree; its enforcement path
+  still needs a run under the platform account's delegated subtree on the
+  production host.
 
 ## 6. Outstanding qualification work
 
 1. Run Tier 2 on a host with delegated cgroups and unprivileged namespaces.
 2. Measure and verify quota-lease ownership/renewal at runtime under load.
 3. Run a real, owner-scored 30-task evaluation.
-4. Perform a kernel-backed sandbox stress run.
+4. ~~Perform a kernel-backed sandbox stress run.~~ Done on the
+   `systemd-run` leg (see §5); re-run on the production host to qualify the
+   raw cgroup-delegation leg under the platform account's delegated subtree.
 5. Verify audit query completeness.
 6. Run a full restore drill against clean staging and measure RTO.
 7. Qualify the target adapter's privileged execution boundary and a clean

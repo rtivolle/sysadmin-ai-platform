@@ -152,3 +152,31 @@ and record new measurements in `docs/status/TEST_READY.md`.
   3080, ForwardAuth 3081, harness gateway 3085, inference 8000, SeaweedFS
   8333/9333/8888, VictoriaLogs 9428, Valkey 6379.
 - There is no Docker anywhere in the runtime; do not introduce containers.
+
+## 8. Multiple agents working on the same repository
+
+Several coding agents may edit this project at the same time. Treat every agent
+as an independent contributor with no shared memory beyond the files in the
+repository.
+
+- **One task per agent.** Each agent should own a single, well-scoped change.
+  If two agents need the same file, split the work or serialize it.
+- **Start from a clean working tree.** Before making changes, check the current
+  branch and uncommitted modifications; do not overwrite another agent's in-flight
+  work.
+- **Never commit, push or reset Git history** unless the user explicitly asks for
+  it. Ask for confirmation before any `git commit`, `git push`, `git reset`,
+  `git rebase` or merge.
+- **Do not touch generated or secret directories** (`backend/config/keys/*`,
+  `backend/bin`, `backend/logs`, `backend/run`, `backend/data/` runtime state,
+  `.pytest_cache`).
+- **Communicate through the files.** Write clear commit-sized changes, update the
+  relevant `docs/` pages, and record new measurements in
+  `docs/status/TEST_READY.md` when behaviour changes.
+- **Run the right tests for your change.** See §6. Do not rely on another agent
+  to verify your edits.
+- **If you see conflicts, stop and ask.** Do not silently resolve a conflict that
+  involves another agent's work, guardrails, secrets, or the verification
+  baseline. Surface the collision and wait for direction.
+- **Respect the guardrails in §4.** They apply no matter how many agents are
+  active.
