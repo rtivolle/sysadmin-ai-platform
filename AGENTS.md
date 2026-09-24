@@ -128,15 +128,18 @@ per-user bearer keys from those files.
 | Harness package | `make harness-test && make harness-verify` |
 | Anything user-visible | update `docs/` and record results in `docs/status/TEST_READY.md` |
 
-Baseline on the development host (2026-09-24): with no live stack the suite
-collects **436 tests** and reports **423 passed, 13 skipped** — six live
-ForwardAuth/Traefik checks plus the seven `test_platform.py` sections, which
-skip when the stack is down and fail on any recorded error instead of passing
-silently. With the stack running those thirteen execute for real. Tier 2
-sandbox **129 passed** (including the 80-case M4 challenger pack); harness
-**19 node tests + 7/7 dsh checks**. Treat these as a regression baseline, not
-a production acceptance certificate, and record new measurements in
-`docs/status/TEST_READY.md`.
+Baseline on the development host (2026-09-24): the suite collects **436 tests**.
+With Valkey reachable and the other backend services stopped it reports
+**423 passed, 13 skipped** — eleven live auth/Traefik/Valkey challenger checks
+plus the seven `test_platform.py` sections, which skip when the stack is down
+and fail on any recorded error instead of passing silently. With every backend
+service stopped: **416 passed, 20 skipped**. With the stack up except Traefik
+(the harness live-run configuration): **428 passed, 8 skipped**. Tier 2 sandbox
+**129 passed** (including the 80-case M4 challenger pack); harness **45 node
+tests + 8/8 dsh checks + 37/37 live gateway checks** (`make harness-test`,
+`make harness-verify`, `packages/harness-integration/scripts/verify-live-gateway.mjs`).
+Treat these as a regression baseline, not a production acceptance certificate,
+and record new measurements in `docs/status/TEST_READY.md`.
 
 ## 7. Environment notes
 

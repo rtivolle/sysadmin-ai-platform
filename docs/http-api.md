@@ -15,6 +15,11 @@ Base URLs:
 | Inference | `http://127.0.0.1:8000` | not routed directly |
 | VictoriaLogs | `http://127.0.0.1:9428` | `http://127.0.0.1:8080` (`/select`, `/insert`) |
 | SeaweedFS S3 | `http://127.0.0.1:8333` | `http://127.0.0.1:8080/s3` |
+| Harness gateway | `http://127.0.0.1:3085` | not routed directly |
+
+The agent platform port is `3080` by default; `platform.sh` honors
+`SYSADMIN_AGENT_PORT` on hosts where that port is already taken
+(see [harness-integration.md](harness-integration.md#5-running-and-testing)).
 
 ---
 
@@ -218,4 +223,51 @@ enforces the caller's per-user limits, and recorded by the
 
 ## Harness gateway (:3085)
 
-See [harness-integration.md](harness-integration.md#gateway-endpoints).
+The multi-user front door for the DeepSeek Harness integration. It also serves
+the Mila-branded admin console. Sessions and instances persist under
+`backend/data/harness`; see
+[harness-integration.md](harness-integration.md#1-multi-user-gateway) for the
+auth model, persistence and branding.
+
+### Gateway surface
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/gateway/health` | Health, active users, session and instance counts. |
+| GET | `/api/gateway/login` | Mila-branded login page. |
+| POST | `/api/gateway/login` | Authenticate against the auth gateway (JSON or form). |
+| POST | `/api/gateway/logout` | Clear the gateway session. |
+| GET | `/admin`, `/assets/*` | Mila-branded admin console and its static assets. |
+| any | everything else | Proxied to the caller's harness instance (HTTP and WebSocket). |
+
+### Admin console API
+
+The operator logs in with the master token from `backend/config/keys/master.key`
+(constant-time compare against the key file, then a bearer probe of the backend;
+an unreachable backend is allowed with a warning, an explicit `401`/`403` is
+rejected). The session cookie is `sysadmin_admin` (HttpOnly, SameSite=Lax,
+12 h), persisted to `admin-sessions.jsonl`. Every mutation except
+`POST /api/admin/logout` requires `content-type: application/json`, the
+`X-Sysadmin-Admin: 1` header and, when the browser sends one, a same-origin
+`Origin` (`415`/`403` otherwise). Browser sessions are exposed only as
+16-character SHA-256 handles of the cookie value; the master token and user
+keys are never returned.
+
+| Method | Path | Purpose | Backend call |
+|---|---|---|---|
+| GET | `/api/admin/session` | Unauthenticated login probe; reports gateway ports. | — |
+| POST | `/api/admin/login` | Verify the master token, start the admin session. | `GET /api/approvals/pending` |
+| POST | `/api/admin/logout` | Clear the admin session. | — |
+| GET | `/api/admin/overview` | Gateway counters plus live service probes. | service health endpoints + Valkey TCP |
+| GET | `/api/admin/sessions` | List browser sessions with instance status. | — |
+| POST | `/api/admin/sessions/{id}/revoke` | Revoke one session (optional body `{"stopInstance":true}`); `id` is the 16-char SHA-256 handle. | — |
+| GET | `/api/admin/instances` | List harness instances. | — |
+| POST | `/api/admin/instances/{user}/start\|stop\|restart` | Supervise one user's instance. | — |
+| GET | `/api/admin/instances/{user}/logs?tail=` | Tail the user's log (`tail` 1 KiB–200 KiB, default 32 KiB). | — |
+| GET | `/api/admin/users` | Provisioned users, key presence, sessions, instance. | — |
+| POST | `/api/admin/users/{user}/rotate-password` | Rotate one login password; the response names `initial-passwords.txt` and never contains the value. | `provision-logins.py --user <user> --rotate` |
+| GET | `/api/admin/approvals` | Pending approvals. | `GET /api/approvals/pending` |
+| POST | `/api/admin/approvals/decide` | Approve or reject an approval. | `POST /api/approvals/decide` |
+| GET | `/api/admin/audit?query=&limit=` | Query the audit trail (LogsQL; `limit` ≤ 500, default 100). | VictoriaLogs `/select/logsql/query` |
+| GET | `/api/admin/services` | Service list with ports and pid liveness. | — |
+| POST | `/api/admin/services/{name}/restart` | Restart one service, serialized, 30 s timeout. | `platform.sh service <name> restart` |
