@@ -21,12 +21,15 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { AuditSink, DEFAULT_VICTORIALOGS_URL } from './lib/audit.js'
 import { BackendClient, BackendError } from './lib/backend.js'
+import { brandIndexHtml, BRAND_TITLE } from './lib/branding.js'
 import { POLICY_ACTIONS, commandFromToolCall, evaluateCommandSafety } from './lib/policy.js'
 
 export const name = 'sysadmin-harness'
 
 /** The tool registry must exist before this plugin registers into it. */
 export const inject = ['tools']
+
+export { brandIndexHtml, BRAND_TITLE }
 
 export const Config = Schema.object({
   /** Authenticated sysadmin identity, injected per user by the harness gateway. */
@@ -216,6 +219,18 @@ export function apply(ctx, config) {
       },
     }))
   }
+
+  // ── 4. Mila branding of the harness tab (supported index-tap seam) ───────
+  // `webServer` exists only in the web composition; the callback simply never
+  // runs in a headless profile.
+  ctx.inject(['webServer'], (webCtx) => {
+    try {
+      webCtx.effect(() => webCtx.webServer.tapIndex((html) => brandIndexHtml(html)))
+      webCtx.logger?.info?.(`[sysadmin-harness] Mila branding applied to the web index`)
+    } catch (error) {
+      webCtx.logger?.warn?.(`[sysadmin-harness] could not apply Mila branding: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
 
   const banner = `[sysadmin-harness] loaded user=${config.userId} backend=${config.backendBaseUrl} policy=${config.enforceCommandPolicy ? 'on' : 'off'}`
   ctx.logger?.info?.(banner)

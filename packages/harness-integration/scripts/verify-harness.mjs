@@ -130,6 +130,31 @@ async function main() {
   record('web surface bound', booted, booted ? `http://127.0.0.1:${port}/` : 'no launch URL printed')
   record('unauthenticated request refused', httpStatus === 401, `HTTP ${httpStatus}`)
 
+  // 3. Mila branding: the plugin's index tap must retitle the served page.
+  // The launch URL redirects to `/` with a harness cookie; Node's fetch does
+  // not keep cookies across redirects, so carry `set-cookie` over manually the
+  // way a browser would.
+  let indexHtml = ''
+  const launchUrl = output.match(/https?:\/\/[^\s"'<>]*\?token=[A-Za-z0-9._~-]+/)?.[0]
+  if (launchUrl) {
+    try {
+      const handoff = await fetch(launchUrl, { redirect: 'manual', signal: AbortSignal.timeout(10000) })
+      const cookies = (handoff.headers.getSetCookie?.() ?? []).map((value) => value.split(';')[0]).join('; ')
+      const response = await fetch(`http://127.0.0.1:${port}/`, {
+        headers: cookies ? { cookie: cookies } : {},
+        signal: AbortSignal.timeout(10000),
+      })
+      indexHtml = await response.text()
+    } catch {
+      /* reported as a failed check below */
+    }
+  }
+  record(
+    'Mila branding applied to the served index',
+    indexHtml.includes('<title>Mila — Sysadmin AI</title>') && indexHtml.includes('/assets/mila-logo.png'),
+    launchUrl ? 'title and favicon rewritten' : 'no launch URL captured from stdout',
+  )
+
   if (!hasFlag('keep')) {
     child.kill('SIGTERM')
     await delay(1000)

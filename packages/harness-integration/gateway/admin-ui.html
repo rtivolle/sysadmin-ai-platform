@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mila — Console d'administration sysadmin</title>
+  <link rel="icon" href="/assets/mila-logo.png">
+  <link rel="stylesheet" href="/assets/brand.css">
+  <link rel="stylesheet" href="/admin-ui.css">
+</head>
+<body class="mila">
+  <header class="mila-header">
+    <a href="https://mila.quebec/" target="_blank" rel="noopener"><img src="/assets/mila-logo.png" alt="Mila"></a>
+    <span class="mila-title">Console d'administration — Plateforme IA Sysadmin</span>
+    <span class="mila-spacer"></span>
+    <span class="mila-muted" id="admin-user"></span>
+    <button class="mila-button secondary" id="logout" hidden>Déconnexion</button>
+  </header>
+
+  <main class="mila-admin">
+    <section id="login-view" hidden>
+      <div class="mila-login">
+        <div class="mila-card">
+          <h1>Console d'administration</h1>
+          <p class="subtitle">Accès réservé — jeton maître de la plateforme.</p>
+          <form id="login-form">
+            <label for="token" class="mila-muted">Jeton maître (master.key)</label>
+            <input class="mila-input" id="token" type="password" autocomplete="current-password" required>
+            <p class="mila-error" id="login-error"></p>
+            <button class="mila-button" type="submit" id="login-submit">Se connecter</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="console-view" hidden>
+      <nav class="mila-tabs" id="tabs">
+        <button data-tab="overview" class="active">Vue d'ensemble</button>
+        <button data-tab="users">Utilisateurs &amp; sessions</button>
+        <button data-tab="instances">Instances</button>
+        <button data-tab="approvals">Approbations</button>
+        <button data-tab="audit">Audit</button>
+        <button data-tab="services">Services</button>
+      </nav>
+      <p class="mila-error" id="console-error"></p>
+      <div id="tab-overview"></div>
+      <div id="tab-users" hidden></div>
+      <div id="tab-instances" hidden></div>
+      <div id="tab-approvals" hidden></div>
+      <div id="tab-audit" hidden></div>
+      <div id="tab-services" hidden></div>
+    </section>
+  </main>
+
+  <footer class="mila-footer">
+    <a href="https://mila.quebec/" target="_blank" rel="noopener">Mila — Institut québécois d'intelligence artificielle</a>
+    · Plateforme IA Sysadmin
+  </footer>
+
+  <script src="/admin-ui.js"></script>
+</body>
+</html>

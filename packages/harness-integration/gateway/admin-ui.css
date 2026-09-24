@@ -1,0 +1,34 @@
+/* Admin-console-only layout; colors and primitives live in assets/brand.css. */
+#login-view .mila-card form {
+  display: block;
+}
+
+#login-view .mila-card label {
+  display: block;
+  margin-bottom: 0.3rem;
+}
+
+#login-view .mila-card input {
+  margin-bottom: 0.4rem;
+}
+
+#admin-user {
+  margin-right: 0.5rem;
+}
+
+#tab-overview .mila-table td,
+#tab-overview .mila-table th {
+  width: auto;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82em;
+  background: #f0f1f6;
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+}
+
+.mila-log[hidden] {
+  display: none;
+}

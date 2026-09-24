@@ -1,12 +1,20 @@
 /**
- * Multi-user login gateway for the sysadmin harness.
+ * Multi-user login gateway for the sysadmin harness, with the Mila-branded
+ * admin console folded in.
  *
  * Flow:
- *   1. The browser POSTs credentials to `/api/gateway/login`.
+ *   1. The browser POSTs credentials to `/api/gateway/login` (the login page is
+ *      the Mila-branded HTML served from `/api/gateway/login`).
  *   2. The gateway authenticates them against the platform auth gateway
  *      (`POST /api/v1/auth/login`) and stores an opaque gateway session cookie.
+ *      Sessions persist to `SYSADMIN_SESSIONS_FILE`, so a gateway restart does
+ *      not log anyone out.
  *   3. Every other request is routed to the harness instance owned by that
- *      identity, starting it on first use.
+ *      identity, starting it on first use; instances are recorded in the
+ *      registry and re-adopted on the same port after a restart.
+ *   4. `/admin` serves the Mila-branded admin console (see admin.js), which
+ *      authenticates with the master key and manages users, sessions, harness
+ *      instances, approvals, audit and backend services.
  *
  * The gateway never reads or stores the sysadmin password beyond the login
  * exchange, and it never derives identity from a client header.
@@ -14,7 +22,9 @@
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { connect as netConnect } from 'node:net'
 import { pathToFileURL } from 'node:url'
+import { createAdminConsole } from './admin.js'
 import { loadConfig } from './config.js'
+import { acceptsHtml, readBody, sendJson } from './http-util.js'
 import { InstanceError, InstanceManager } from './instance-manager.js'
 import { parseCookies, SessionStore } from './session-store.js'
 
@@ -24,34 +34,74 @@ const HOP_BY_HOP = new Set([
 ])
 
 const MAX_LOGIN_BODY_BYTES = 16 * 1024
-const LOGIN_PAGE = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Sysadmin AI Platform — Sign in</title>
-<style>body{font-family:system-ui,sans-serif;max-width:26rem;margin:12vh auto;padding:0 1rem}
-input,button{width:100%;padding:.6rem;margin:.3rem 0;box-sizing:border-box}
-p.err{color:#b00}</style></head>
-<body><h1>Sysadmin AI Platform</h1>
-<form method="post" action="/api/gateway/login" enctype="application/x-www-form-urlencoded">
-<input name="username" placeholder="sysadmin-01" autocomplete="username" required>
-<input name="password" type="password" placeholder="Password" autocomplete="current-password" required>
-<button type="submit">Sign in</button></form></body></html>`
+const TOKEN_RECOVERY_COOLDOWN_MS = 60_000
+
+export const LOGIN_PAGE = `<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mila — Plateforme IA Sysadmin — Connexion</title>
+<link rel="icon" href="/assets/mila-logo.png">
+<link rel="stylesheet" href="/assets/brand.css">
+<style>input{margin-bottom:.55rem}button{margin-top:.4rem;width:100%}</style></head>
+<body class="mila">
+<div class="mila-login">
+  <div class="mila-card" style="text-align:center">
+    <a href="https://mila.quebec/" target="_blank" rel="noopener"><img src="/assets/mila-logo.png" alt="Mila" style="height:44px;margin-bottom:.75rem"></a>
+    <h1 style="font-size:1.15rem;margin:0 0 .2rem">Plateforme IA Sysadmin</h1>
+    <p class="subtitle">Connectez-vous avec vos identifiants administrateur système.</p>
+    <form method="post" action="/api/gateway/login" enctype="application/x-www-form-urlencoded" style="text-align:left">
+      <label class="mila-muted" for="username">Utilisateur</label>
+      <input class="mila-input" id="username" name="username" placeholder="sysadmin-01" autocomplete="username" required>
+      <label class="mila-muted" for="password">Mot de passe</label>
+      <input class="mila-input" id="password" name="password" type="password" placeholder="Mot de passe" autocomplete="current-password" required>
+      <button class="mila-button" type="submit">Se connecter</button>
+    </form>
+  </div>
+</div>
+<footer class="mila-footer"><a href="https://mila.quebec/" target="_blank" rel="noopener">Mila — Institut québécois d'intelligence artificielle</a></footer>
+</body></html>`
 
 /**
  * @param {object} [options]
  * @param {ReturnType<typeof loadConfig>} [options.config]
  * @param {(message: string, meta?: unknown) => void} [options.logger]
  * @param {SessionStore} [options.sessions] inject a store (tests)
+ * @param {SessionStore} [options.adminSessions] inject the admin store (tests)
  * @param {InstanceManager} [options.instances] inject a manager (tests)
  */
 export function createGateway({
   config = loadConfig(),
   logger = () => {},
   sessions: injectedSessions,
+  adminSessions: injectedAdminSessions,
   instances: injectedInstances,
 } = {}) {
-  const sessions = injectedSessions ?? new SessionStore({ ttlMs: config.sessionTtlMs })
+  const log = logger
+  const sessions = injectedSessions ?? new SessionStore({
+    ttlMs: config.sessionTtlMs,
+    path: config.sessionsFile,
+    logger: (message) => log(`sessions: ${message}`),
+  })
+  const adminSessions = injectedAdminSessions ?? new SessionStore({
+    ttlMs: config.adminTtlMs,
+    path: config.adminSessionsFile,
+    logger: (message) => log(`admin sessions: ${message}`),
+  })
   const instances = injectedInstances ?? new InstanceManager({ config, logger })
 
-  const log = logger
+  const loaded = sessions.load()
+  if (loaded > 0) log(`loaded ${loaded} persisted browser session(s)`)
+  const loadedAdmin = adminSessions.load()
+  if (loadedAdmin > 0) log(`loaded ${loadedAdmin} persisted admin session(s)`)
+
+  const admin = createAdminConsole({
+    config,
+    sessions,
+    adminSessions,
+    instances,
+    logger: (message) => log(message),
+  })
+
+  const startedAt = Date.now()
 
   const server = createHttpServer((req, res) => {
     handleRequest(req, res).catch((error) => {
@@ -77,24 +127,29 @@ export function createGateway({
         status: 'healthy',
         service: 'sysadmin_harness_gateway',
         active_users: instances.activeUsers(),
-        sessions: sessions.sessions.size,
+        sessions: sessions.list().length,
+        instances: instances.listStatus().length,
+        uptime_ms: Date.now() - startedAt,
       })
     }
 
     if (url.pathname === '/api/gateway/login') {
       if (req.method === 'GET') {
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         return res.end(LOGIN_PAGE)
       }
       return handleLogin(req, res)
     }
 
-    if (url.pathname === '/api/gateway/logout') {
+    if (url.pathname === '/api/gateway/logout' && req.method === 'POST') {
       const cookies = parseCookies(req.headers.cookie)
       sessions.delete(cookies[config.cookieName])
       res.setHeader('set-cookie', `${config.cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`)
       return sendJson(res, 200, { status: 'logged_out' })
     }
+
+    // Admin console and its assets are gateway-owned surfaces.
+    if (await admin.handle(req, res, url)) return
 
     const session = currentSession(req)
     if (!session) {
@@ -106,6 +161,7 @@ export function createGateway({
     }
 
     const instance = await instances.ensure(session.userId)
+    instances.touch?.(session.userId)
 
     // A freshly started instance prints an authenticated launch URL. Hand the
     // browser through it once so the harness can establish its own cookie,
@@ -122,7 +178,7 @@ export function createGateway({
       }
     }
 
-    return proxyHttp(req, res, instance)
+    return proxyHttp(req, res, instance, url)
   }
 
   /**
@@ -178,6 +234,13 @@ export function createGateway({
       return sendJson(res, 503, { detail: `harness unavailable: ${error instanceof Error ? error.message : String(error)}` })
     }
 
+    // The branded HTML form posts url-encoded and expects to land in the app;
+    // JSON callers get the JSON contract (used by tests and scripts).
+    if (!String(req.headers['content-type'] ?? '').includes('application/json')) {
+      res.writeHead(302, { location: '/' })
+      return res.end()
+    }
+
     return sendJson(res, 200, {
       status: 'authenticated',
       user: userId,
@@ -199,8 +262,9 @@ export function createGateway({
    * @param {import('node:http').IncomingMessage} req
    * @param {import('node:http').ServerResponse} res
    * @param {import('./instance-manager.js').HarnessInstance} instance
+   * @param {URL} url
    */
-  function proxyHttp(req, res, instance) {
+  function proxyHttp(req, res, instance, url) {
     const headers = { ...req.headers }
     for (const name of Object.keys(headers)) {
       if (HOP_BY_HOP.has(name.toLowerCase())) delete headers[name]
@@ -216,6 +280,23 @@ export function createGateway({
         headers,
       },
       (upstreamResponse) => {
+        // An adopted instance has no launch token in memory. If its browser
+        // cookie is gone too, the harness answers 401 on `/`; mint a fresh
+        // launch token by restarting the instance once, then reload through it.
+        if (
+          upstreamResponse.statusCode === 401
+          && req.method === 'GET'
+          && url.pathname === '/'
+          && acceptsHtml(req)
+          && recoverLaunchToken(instance)
+        ) {
+          res.writeHead(302, {
+            location: '/',
+            'set-cookie': 'sysadmin_launch_done=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
+          })
+          upstreamResponse.resume()
+          return res.end()
+        }
         const responseHeaders = { ...upstreamResponse.headers }
         for (const name of Object.keys(responseHeaders)) {
           if (HOP_BY_HOP.has(name.toLowerCase())) delete responseHeaders[name]
@@ -235,6 +316,25 @@ export function createGateway({
   }
 
   /**
+   * Restart an instance whose browser session expired so a new single-use
+   * launch token is printed. Rate-limited per instance to avoid restart loops.
+   *
+   * @param {import('./instance-manager.js').HarnessInstance} instance
+   * @returns {boolean} true when a recovery restart was started
+   */
+  function recoverLaunchToken(instance) {
+    const now = Date.now()
+    if (instance.tokenRecoveryAt && now - instance.tokenRecoveryAt < TOKEN_RECOVERY_COOLDOWN_MS) return false
+    instance.tokenRecoveryAt = now
+    log(`harness for ${instance.userId} refused a browser navigation; restarting it to mint a fresh launch token`)
+    instances.restart(instance.userId).then(
+      (fresh) => log(`launch-token recovery for ${instance.userId} finished on port ${fresh.port}`),
+      (error) => log(`launch-token recovery for ${instance.userId} failed: ${error instanceof Error ? error.message : String(error)}`),
+    )
+    return true
+  }
+
+  /**
    * @param {import('node:http').IncomingMessage} req
    * @param {import('node:stream').Duplex} socket
    * @param {Buffer} head
@@ -244,6 +344,7 @@ export function createGateway({
     if (!session) return socket.destroy()
 
     const instance = await instances.ensure(session.userId)
+    instances.touch?.(session.userId)
     const upstream = netConnect(instance.port, config.instanceHost, () => {
       const headers = { ...req.headers, host: `${config.instanceHost}:${instance.port}` }
       delete headers.upgrade
@@ -267,13 +368,21 @@ export function createGateway({
   return {
     server,
     sessions,
+    adminSessions,
     instances,
+    admin,
     config,
     /**
      * @param {number} [port]
      * @returns {Promise<{ port: number, url: string }>}
      */
-    start(port = config.port) {
+    async start(port = config.port) {
+      const recovery = await instances.recover?.()
+      if (recovery?.adopted?.length > 0) log(`re-adopted ${recovery.adopted.length} running harness instance(s): ${recovery.adopted.join(', ')}`)
+      if (recovery?.dropped?.length > 0) log(`dropped ${recovery.dropped.length} stale instance record(s): ${recovery.dropped.join(', ')}`)
+      if (recovery?.unknownOwner?.length > 0) log(`left ${recovery.unknownOwner.length} unknown-owner port(s) alone: ${recovery.unknownOwner.join(', ')}`)
+      instances.reEnsure?.(sessions)
+      instances.startIdleSweeper?.((userId) => sessions.hasUser(userId))
       return new Promise((resolve, reject) => {
         server.once('error', reject)
         server.listen(port, config.host, () => {
@@ -283,36 +392,24 @@ export function createGateway({
         })
       })
     },
-    async stop() {
-      instances.stopAll?.()
+    /**
+     * Stop the HTTP surface and flush persisted state.
+     *
+     * @param {object} [options]
+     * @param {boolean} [options.stopInstances] false = leave harness children
+     *   running so a restarted gateway re-adopts them (browser sessions keep
+     *   working); platform.sh reaps them on a full platform stop.
+     * @param {boolean} [options.keepRegistry]
+     */
+    async stop({ stopInstances = true, keepRegistry = false } = {}) {
+      sessions.flush()
+      adminSessions.flush()
+      await instances.stopAll?.({ stopInstances, keepRegistry: keepRegistry || !stopInstances })
       // Undici keeps connections alive; without this, close() waits for them.
       server.closeAllConnections?.()
       await new Promise((resolve) => server.close(() => resolve()))
     },
   }
-}
-
-/**
- * @param {import('node:http').IncomingMessage} req
- * @param {number} limit
- * @returns {Promise<string>}
- */
-export function readBody(req, limit) {
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    let size = 0
-    req.on('data', (chunk) => {
-      size += chunk.length
-      if (size > limit) {
-        reject(new Error('request body too large'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', reject)
-  })
 }
 
 /**
@@ -337,23 +434,12 @@ export function parseCredentials(raw, contentType) {
   }
 }
 
-/** @param {import('node:http').ServerResponse} res */
-export function sendJson(res, status, payload) {
-  const body = JSON.stringify(payload)
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
-  res.end(body)
-}
-
 async function safeJson(response) {
   try {
     return await response.json()
   } catch {
     return null
   }
-}
-
-function acceptsHtml(req) {
-  return String(req.headers.accept ?? '').includes('text/html')
 }
 
 /**
@@ -373,6 +459,7 @@ export async function waitForLaunchToken(instance, timeoutMs) {
 }
 
 export { InstanceError }
+export { readBody, sendJson }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const gateway = createGateway({
@@ -380,8 +467,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   })
   const { url } = await gateway.start()
   console.log(`[gateway] sysadmin harness gateway listening on ${url}`)
+  console.log(`[gateway] Mila admin console: ${url}/admin`)
+  const stopOnExit = process.env.SYSADMIN_INSTANCE_STOP_ON_EXIT === '1'
+  let shuttingDown = false
   const shutdown = async () => {
-    await gateway.stop()
+    if (shuttingDown) return
+    shuttingDown = true
+    console.log(`[gateway] shutting down (instances: ${stopOnExit ? 'stopping' : 'left running for re-adoption'})`)
+    await gateway.stop({ stopInstances: stopOnExit })
     process.exit(0)
   }
   process.on('SIGINT', shutdown)

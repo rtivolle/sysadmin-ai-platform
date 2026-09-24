@@ -1,0 +1,296 @@
+/*
+ * Mila brand stylesheet shared by every gateway-owned page (login, admin
+ * console). Colors come from the Mila site's own palette: accent blue
+ * #003cc5, dark slate #353641, white text on the accent.
+ * The logo is vendored locally; links always point back to https://mila.quebec/.
+ */
+:root {
+  --mila-blue: #003cc5;
+  --mila-blue-dark: #00309e;
+  --mila-slate: #353641;
+  --mila-muted: #6b6c78;
+  --mila-line: #e2e3ea;
+  --mila-bg: #f5f6fa;
+  --mila-white: #ffffff;
+  --mila-danger: #b3261e;
+  --mila-ok: #1c7a3d;
+  --mila-warn: #9a6700;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body.mila {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--mila-bg);
+  color: var(--mila-slate);
+  line-height: 1.5;
+}
+
+.mila-header {
+  background: var(--mila-white);
+  border-bottom: 3px solid var(--mila-blue);
+  padding: 0.9rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.mila-header img {
+  height: 34px;
+  width: auto;
+  display: block;
+}
+
+.mila-header .mila-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--mila-slate);
+}
+
+.mila-header .mila-spacer {
+  flex: 1;
+}
+
+.mila-header a.mila-site {
+  color: var(--mila-blue);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.mila-header a.mila-site:hover {
+  text-decoration: underline;
+}
+
+.mila-card {
+  background: var(--mila-white);
+  border: 1px solid var(--mila-line);
+  border-radius: 10px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(53, 54, 65, 0.08);
+}
+
+.mila-footer {
+  margin-top: 2rem;
+  padding: 1rem 1.5rem;
+  color: var(--mila-muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.mila-footer a {
+  color: var(--mila-blue);
+  text-decoration: none;
+}
+
+.mila-footer a:hover {
+  text-decoration: underline;
+}
+
+.mila-button {
+  display: inline-block;
+  border: 0;
+  border-radius: 6px;
+  background: var(--mila-blue);
+  color: var(--mila-white);
+  padding: 0.55rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mila-button:hover:not(:disabled) {
+  background: var(--mila-blue-dark);
+}
+
+.mila-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.mila-button.secondary {
+  background: var(--mila-white);
+  color: var(--mila-blue);
+  border: 1px solid var(--mila-blue);
+}
+
+.mila-button.secondary:hover:not(:disabled) {
+  background: #eef2fd;
+}
+
+.mila-button.danger {
+  background: var(--mila-danger);
+}
+
+.mila-input {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--mila-line);
+  border-radius: 6px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+
+.mila-input:focus {
+  outline: 2px solid var(--mila-blue);
+  outline-offset: 0;
+  border-color: var(--mila-blue);
+}
+
+.mila-error {
+  color: var(--mila-danger);
+  font-size: 0.9rem;
+  min-height: 1.3em;
+}
+
+/* Login page */
+.mila-login {
+  max-width: 24rem;
+  margin: 10vh auto;
+  padding: 0 1rem;
+}
+
+.mila-login .mila-card h1 {
+  font-size: 1.2rem;
+  margin: 0 0 0.25rem;
+}
+
+.mila-login .mila-card p.subtitle {
+  margin: 0 0 1.1rem;
+  color: var(--mila-muted);
+  font-size: 0.9rem;
+}
+
+/* Admin console */
+.mila-admin {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem 1.5rem 3rem;
+}
+
+.mila-tabs {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--mila-line);
+  margin-bottom: 1rem;
+}
+
+.mila-tabs button {
+  background: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  padding: 0.6rem 0.9rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--mila-muted);
+  cursor: pointer;
+}
+
+.mila-tabs button.active {
+  color: var(--mila-blue);
+  border-bottom-color: var(--mila-blue);
+}
+
+.mila-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 0.75rem;
+}
+
+.mila-status {
+  background: var(--mila-white);
+  border: 1px solid var(--mila-line);
+  border-left: 4px solid var(--mila-muted);
+  border-radius: 8px;
+  padding: 0.75rem 0.9rem;
+}
+
+.mila-status.up { border-left-color: var(--mila-ok); }
+.mila-status.down { border-left-color: var(--mila-danger); }
+.mila-status.degraded { border-left-color: var(--mila-warn); }
+
+.mila-status .name {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.mila-status .detail {
+  font-size: 0.78rem;
+  color: var(--mila-muted);
+  word-break: break-all;
+}
+
+.mila-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--mila-white);
+  font-size: 0.85rem;
+}
+
+.mila-table th,
+.mila-table td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--mila-line);
+  vertical-align: top;
+}
+
+.mila-table th {
+  color: var(--mila-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.mila-section {
+  margin-bottom: 1.25rem;
+}
+
+.mila-section h2 {
+  font-size: 1rem;
+  margin: 0 0 0.6rem;
+}
+
+.mila-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.mila-log {
+  background: #10131a;
+  color: #d8dee9;
+  border-radius: 8px;
+  padding: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 22rem;
+  overflow: auto;
+}
+
+.mila-muted {
+  color: var(--mila-muted);
+  font-size: 0.82rem;
+}
+
+.mila-badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #eceef5;
+  color: var(--mila-slate);
+}
+
+.mila-badge.ok { background: #e2f3e7; color: var(--mila-ok); }
+.mila-badge.bad { background: #fbe6e4; color: var(--mila-danger); }
+.mila-badge.warn { background: #fdf0d8; color: var(--mila-warn); }

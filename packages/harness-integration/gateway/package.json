@@ -7,9 +7,12 @@
   "main": "server.js",
   "exports": {
     ".": "./server.js",
+    "./admin": "./admin.js",
     "./config": "./config.js",
+    "./http": "./http-util.js",
     "./instances": "./instance-manager.js",
-    "./sessions": "./session-store.js"
+    "./sessions": "./session-store.js",
+    "./state-file": "./state-file.js"
   },
   "scripts": {
     "start": "node server.js"

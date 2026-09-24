@@ -145,12 +145,16 @@ test('gateway authenticates a user, scopes their instance, and proxies to it', a
     instancePortStart: upstream.port,
     instancePortEnd: upstream.port,
   }
+  const touched = []
   const instances = {
     async ensure(userId) {
       ensured.push(userId)
-      return { userId, port: upstream.port, launchToken: 'launch-token-1', url: upstream.url }
+      return { userId, port: upstream.port, launchToken: 'launch-token-1', url: upstream.url, adopted: false }
     },
     activeUsers: () => ensured,
+    touch(userId) {
+      touched.push(userId)
+    },
   }
 
   const gateway = createGateway({ config, instances })
@@ -204,6 +208,10 @@ test('gateway authenticates a user, scopes their instance, and proxies to it', a
     })
     assert.equal(proxied.status, 200)
     assert.equal(await proxied.text(), 'UPSTREAM /api/v1/agent/sessions')
+    assert.ok(
+      touched.length >= 1 && touched.every((userId) => userId === 'sysadmin-01'),
+      'proxied requests must touch the user instance for idle eviction',
+    )
 
     // 6. Logout invalidates the session.
     const logout = await fetch(`${url}/api/gateway/logout`, {
@@ -217,6 +225,115 @@ test('gateway authenticates a user, scopes their instance, and proxies to it', a
     assert.equal(afterLogout.status, 401)
   } finally {
     await gateway.stop()
+    await close(auth.server)
+    await close(upstream.server)
+  }
+})
+
+/** Auth stub accepting one user/password pair. */
+function stubAuth(user, password) {
+  return listen((req, res) => {
+    let body = ''
+    req.on('data', (chunk) => { body += chunk })
+    req.on('end', () => {
+      if (req.url === '/api/v1/auth/login' && body.includes(user) && body.includes(password)) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ status: 'authenticated', user, role: 'sysadmin' }))
+      } else {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ detail: 'Invalid sysadmin credentials' }))
+      }
+    })
+  })
+}
+
+test('gateway recovers instances and re-ensures persisted sessions at boot', async () => {
+  const calls = { recover: 0, reEnsure: 0, sweep: 0, preStarted: [] }
+  const sessions = new SessionStore({ ttlMs: 60_000 })
+  const adminSessions = new SessionStore({ ttlMs: 60_000 })
+  sessions.create('sysadmin-01')
+
+  const instances = {
+    async recover() {
+      calls.recover += 1
+      return { adopted: ['sysadmin-01'], dropped: ['sysadmin-09'], unknownOwner: [] }
+    },
+    reEnsure(store) {
+      calls.reEnsure += 1
+      calls.preStarted = store.list().map((record) => record.userId)
+    },
+    startIdleSweeper() {
+      calls.sweep += 1
+    },
+    activeUsers: () => ['sysadmin-01'],
+  }
+
+  const gateway = createGateway({
+    config: { ...loadConfig({}), instanceRegistryDir: join(scratch, 'instances'), sessionsFile: null },
+    sessions,
+    adminSessions,
+    instances,
+  })
+  await gateway.start(0)
+  try {
+    assert.equal(calls.recover, 1)
+    assert.equal(calls.reEnsure, 1)
+    assert.equal(calls.sweep, 1)
+    assert.deepEqual(calls.preStarted, ['sysadmin-01'], 'boot must eagerly re-ensure users with persisted sessions')
+  } finally {
+    await gateway.stop()
+  }
+})
+
+test('gateway sessions survive a gateway restart on the same state root', async () => {
+  const auth = await stubAuth('sysadmin-01', 'correct-horse')
+  const upstream = await listen((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end(`UPSTREAM ${req.url}`)
+  })
+  const stateRoot = join(scratch, 'restart-state')
+  const config = {
+    ...loadConfig({}),
+    authUrl: auth.url,
+    stateRoot,
+    sessionsFile: join(stateRoot, 'sessions.jsonl'),
+    adminSessionsFile: join(stateRoot, 'admin-sessions.jsonl'),
+    instanceRegistryDir: join(stateRoot, 'instances'),
+    instanceLogDir: join(stateRoot, 'logs'),
+    instanceHost: '127.0.0.1',
+    instancePortStart: upstream.port,
+    instancePortEnd: upstream.port,
+  }
+  const instances = {
+    async ensure(userId) {
+      return { userId, port: upstream.port, launchToken: 'restart-token', url: upstream.url, adopted: false }
+    },
+    activeUsers: () => ['sysadmin-01'],
+    async stopAll() {},
+  }
+
+  const gateway1 = createGateway({ config, instances })
+  const first = await gateway1.start(0)
+  const login = await fetch(`${first.url}/api/gateway/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'sysadmin-01', password: 'correct-horse' }),
+  })
+  assert.equal(login.status, 200)
+  const sessionCookie = login.headers.get('set-cookie').split(';')[0]
+  await gateway1.stop({ stopInstances: false })
+
+  const gateway2 = createGateway({ config, instances })
+  const second = await gateway2.start(0)
+  try {
+    assert.equal(gateway2.sessions.get(sessionCookie.split('=')[1])?.userId, 'sysadmin-01', 'session must reload from disk')
+    const proxied = await fetch(`${second.url}/api/v1/agent/sessions`, {
+      headers: { cookie: `${sessionCookie}; sysadmin_launch_done=1` },
+    })
+    assert.equal(proxied.status, 200, 'a browser with a persisted cookie must not need to log in again')
+    assert.equal(await proxied.text(), 'UPSTREAM /api/v1/agent/sessions')
+  } finally {
+    await gateway2.stop()
     await close(auth.server)
     await close(upstream.server)
   }
