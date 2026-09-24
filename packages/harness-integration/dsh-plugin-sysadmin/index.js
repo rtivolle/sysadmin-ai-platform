@@ -217,5 +217,9 @@ export function apply(ctx, config) {
     }))
   }
 
-  ctx.logger?.info?.(`[sysadmin-harness] loaded for user=${config.userId} backend=${config.backendBaseUrl}`)
+  const banner = `[sysadmin-harness] loaded user=${config.userId} backend=${config.backendBaseUrl} policy=${config.enforceCommandPolicy ? 'on' : 'off'}`
+  ctx.logger?.info?.(banner)
+  // A startup banner on stdout is deliberate: it is the evidence operators and
+  // the verification script use to confirm the bundle actually loaded.
+  console.log(banner)
 }

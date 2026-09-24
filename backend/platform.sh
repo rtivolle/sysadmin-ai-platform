@@ -19,6 +19,7 @@ RUN_DIR="${ROOT_DIR}/run"
 SERVICES_DIR="${ROOT_DIR}/services"
 VENV_PYTHON="${ROOT_DIR}/.venv/bin/python3"
 VENV_LITELLM="${ROOT_DIR}/.venv/bin/litellm"
+HARNESS_DIR="${ROOT_DIR}/../packages/harness-integration"
 
 mkdir -p "$LOGS_DIR" "$RUN_DIR" "$DATA_DIR/valkey" "$DATA_DIR/seaweedfs" "$DATA_DIR/victorialogs"
 
@@ -176,6 +177,8 @@ start_all() {
 
 stop_all() {
   echo "Stopping all Sysadmin AI Platform services..."
+  # The harness gateway owns per-user dsh children; stop it before their backend.
+  stop_service "harness_gateway"
   stop_service "traefik"
   stop_service "litellm"
   stop_service "agent_tools"
@@ -199,7 +202,30 @@ show_status() {
   status_service "audit_outbox" "-"
   status_service "victorialogs" "9428"
   status_service "valkey" "6379"
+  status_service "harness_gateway" "3085"
   echo "==========================================="
+}
+
+# The custom DeepSeek Harness multi-user gateway (packages/harness-integration).
+# It is opt-in rather than part of start_all because it needs the `dsh` CLI and
+# boots one harness process per logged-in sysadmin on demand.
+start_harness() {
+  local node_bin
+  node_bin="$(command -v node || true)"
+  if [ -z "$node_bin" ]; then
+    echo "  [!] node is required to run the harness gateway" >&2
+    return 1
+  fi
+  if [ ! -f "${HARNESS_DIR}/gateway/server.js" ]; then
+    echo "  [!] harness gateway not found at ${HARNESS_DIR}/gateway/server.js" >&2
+    return 1
+  fi
+  if ! command -v "${DSH_BIN:-dsh}" >/dev/null 2>&1 && [ ! -x "${DSH_BIN:-dsh}" ]; then
+    echo "  [!] '${DSH_BIN:-dsh}' not found. Set DSH_BIN to the dsh launcher." >&2
+    return 1
+  fi
+  export SYSADMIN_BACKEND_ROOT="${ROOT_DIR}"
+  start_service "harness_gateway" "$node_bin" "${HARNESS_DIR}/gateway/server.js"
 }
 
 show_logs() {
@@ -274,8 +300,14 @@ case "${1:-status}" in
   chat)
     "$VENV_PYTHON" "${ROOT_DIR}/sysadmin_cli.py"
     ;;
+  harness)
+    start_harness
+    ;;
+  harness-stop)
+    stop_service "harness_gateway"
+    ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|dashboard|survey|chat|logs [service]|test}"
+    echo "Usage: $0 {start|stop|restart|status|harness|harness-stop|dashboard|survey|chat|logs [service]|test}"
     exit 1
     ;;
 esac

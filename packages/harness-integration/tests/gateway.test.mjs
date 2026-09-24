@@ -165,10 +165,14 @@ test('gateway authenticates a user, scopes their instance, and proxies to it', a
     })
     assert.equal(bad.status, 401)
 
-    // 2. Unauthenticated access is refused.
-    const anonymous = await fetch(`${url}/`, { redirect: 'manual' })
+    // 2. Unauthenticated browser navigation is redirected to the login page.
+    const anonymous = await fetch(`${url}/`, { redirect: 'manual', headers: { accept: 'text/html' } })
     assert.equal(anonymous.status, 302)
     assert.equal(anonymous.headers.get('location'), '/api/gateway/login')
+
+    // 2b. An unauthenticated API call is refused instead of redirected.
+    const anonymousApi = await fetch(`${url}/api/v1/agent/sessions`, { redirect: 'manual' })
+    assert.equal(anonymousApi.status, 401)
 
     // 3. Good credentials return a session cookie and the user's identity.
     const login = await fetch(`${url}/api/gateway/login`, {

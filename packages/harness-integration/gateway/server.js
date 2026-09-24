@@ -284,7 +284,7 @@ export function createGateway({
       })
     },
     async stop() {
-      instances.stopAll()
+      instances.stopAll?.()
       // Undici keeps connections alive; without this, close() waits for them.
       server.closeAllConnections?.()
       await new Promise((resolve) => server.close(() => resolve()))
