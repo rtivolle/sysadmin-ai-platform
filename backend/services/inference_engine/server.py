@@ -11,7 +11,8 @@ import json
 import asyncio
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
+from starlette.background import BackgroundTask
 import httpx
 import uvicorn
 
@@ -47,8 +48,8 @@ def _registry_running_models() -> List[Dict[str, Any]]:
                 registry.model_registry.update(
                     entry["name"],
                     status=registry.STATUS_ERROR,
-                    server={**(entry.get("server") or {}), "status": "error", "pid": None, "port": None},
-                    last_error="Model server health check failed and shutdown could not be confirmed",
+                    server={**(entry.get("server") or {}), "status": "error"},
+                    last_error="Model server identity was stale and shutdown could not be confirmed",
                 )
     return running
 
@@ -201,19 +202,43 @@ async def chat_completions(request: Request):
         f"{UPSTREAM_VLLM_URL.rstrip('/')}/v1" if UPSTREAM_VLLM_URL else ""
     )
     if upstream_base:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host", "content-length"]}
-            try:
-                upstream_resp = await client.post(
-                    f"{upstream_base}/chat/completions",
-                    json=body,
-                    headers=headers
-                )
-                if stream:
-                    return StreamingResponse(upstream_resp.aiter_raw(), media_type="text/event-stream")
-                return JSONResponse(upstream_resp.json(), status_code=upstream_resp.status_code)
-            except Exception as e:
-                raise HTTPException(status_code=502, detail=f"Error connecting to vLLM backend: {str(e)}")
+        # Keep both response and client alive until the downstream stream closes.
+        client = httpx.AsyncClient(timeout=120.0)
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ["host", "content-length"]}
+        try:
+            upstream_req = client.build_request(
+                "POST", f"{upstream_base}/chat/completions", json=body, headers=headers)
+            upstream_resp = await client.send(upstream_req, stream=True)
+        except Exception as exc:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=f"Error connecting to vLLM backend: {exc}") from exc
+
+        async def close_upstream():
+            # Both the relay `finally` (mid-stream upstream drop / downstream
+            # disconnect) and the BackgroundTask (headers sent, iterator never
+            # consumed) may call this. httpx `aclose` is idempotent, so the
+            # overlap is a harmless no-op; keep both owners.
+            await upstream_resp.aclose()
+            await client.aclose()
+
+        if stream and upstream_resp.is_success:
+            async def relay():
+                try:
+                    async for chunk in upstream_resp.aiter_bytes():
+                        yield chunk
+                finally:
+                    await close_upstream()
+            return StreamingResponse(relay(), status_code=upstream_resp.status_code,
+                                     media_type="text/event-stream",
+                                     background=BackgroundTask(close_upstream))
+        try:
+            await upstream_resp.aread()
+            # Preserve upstream validation errors instead of disguising them as SSE 200.
+            return Response(upstream_resp.content, status_code=upstream_resp.status_code,
+                            media_type=upstream_resp.headers.get("content-type", "application/json"))
+        finally:
+            await close_upstream()
 
     # 2. Local Simulated Inference (Zero GPU overhead for dev/test)
     req_id = f"chatcmpl-{int(time.time()*1000)}"
