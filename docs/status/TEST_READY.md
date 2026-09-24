@@ -142,6 +142,34 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
   GPU-fit guarantee and no per-model GPU isolation. See
   [../model-management.md](../model-management.md).
 
+## llama.cpp GGUF manager integration — Phase 1 (2026-09-24)
+
+- Added a `llamacpp` engine beside default vLLM in the model registry, admin API,
+  local inference routing and LiteLLM sync. Registration requires a strict GGUF
+  basename and server-owned HuggingFace repo/model store; downloader calls
+  `hf_hub_download` for that one file, then verifies it is a regular file under
+  the managed directory. `llamacpp_server` binds loopback, uses the tested
+  context/GPU/Flash-Attention settings and disables model thinking by default.
+- Closed three cross-engine defects: re-registering an active model is
+  rejected; a successful child start is stopped if LiteLLM sync fails; inference
+  no longer turns a model-registry exception or registered-but-stopped model
+  into a simulated completion (503 instead).
+- Initial `make test` before Gate 1 remediation: **513 passed, 8 skipped,
+  0 failed** (41.59 s). Gate 1 found read-path SIGTERM on transient health
+  misses, premature port release after pid-only stop, and a same-model start
+  race. These were fixed: liveness now validates the exact `/proc` command line
+  without making health probes on request paths; reaping waits for the matching
+  PID to exit before clearing state; start jobs install an atomic sentinel and
+  model starts serialize during load.
+- Post-remediation focused and full test counts are pending in this session.
+  `make compile` and `git diff --check` will be repeated after remediation.
+- This phase validates command construction, file/path confinement, injected
+  process lifecycle, admin registration and fail-closed routing in tests only.
+  It has **not** yet run a manager-mediated HF file download, launched llama.cpp
+  through the admin API, or routed a real completion through LiteLLM. Those are
+  Phase 2 live acceptance checks. The only real model evidence remains the
+  separate direct llama.cpp smoke test above.
+
 ## Previously recorded checks
 
 | Check | Result | Scope |

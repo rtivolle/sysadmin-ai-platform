@@ -20,6 +20,11 @@ MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # HuggingFace repo ids look like `org/name`; both sides are path-safe tokens.
 HF_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+GGUF_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.gguf$", re.IGNORECASE)
+
+ENGINE_VLLM = "vllm"
+ENGINE_LLAMACPP = "llamacpp"
+ENGINES = frozenset({ENGINE_VLLM, ENGINE_LLAMACPP})
 
 # Registry status state machine (coarse). `error` carries `last_error`.
 STATUS_REGISTERED = "registered"
@@ -33,7 +38,8 @@ STATUS_ERROR = "error"
 ALLOWED_FIELDS = {
     "name", "hf_repo", "revision", "path", "status", "size_bytes", "created_at",
     "updated_at", "last_error", "quantization", "max_model_len",
-    "tensor_parallel_size", "gpu_memory_utilization", "server",
+    "tensor_parallel_size", "gpu_memory_utilization", "server", "engine",
+    "gguf_file", "ctx_size", "n_gpu_layers", "flash_attn",
 }
 
 
@@ -66,6 +72,21 @@ def validate_revision(revision: Any) -> Optional[str]:
     if not isinstance(revision, str) or not REVISION_RE.match(revision):
         raise ValueError("revision must be a single path-safe token")
     return revision
+
+
+def validate_engine(engine: Any) -> str:
+    if engine is None:
+        return ENGINE_VLLM
+    if engine not in ENGINES:
+        raise ValueError(f"engine must be one of {sorted(ENGINES)}")
+    return engine
+
+
+def validate_gguf_file(filename: Any) -> str:
+    if (not isinstance(filename, str) or os.path.basename(filename) != filename
+            or not GGUF_FILE_RE.fullmatch(filename)):
+        raise ValueError("gguf_file must be a GGUF filename without a directory path")
+    return filename
 
 
 def _now() -> str:

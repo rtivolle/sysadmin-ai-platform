@@ -25,12 +25,32 @@ UPSTREAM_VLLM_URL = os.getenv("UPSTREAM_VLLM_URL", "")
 
 
 def _registry_running_models() -> List[Dict[str, Any]]:
-    """Locally downloaded models whose vLLM server is currently running."""
-    try:
-        from services.model_manager.registry import STATUS_RUNNING, model_registry
-        return [entry for entry in model_registry.all() if entry.get("status") == STATUS_RUNNING]
-    except Exception:
-        return []
+    """Models whose registered server process identity is still live."""
+    from services.model_manager import llamacpp_server, registry, vllm_server
+
+    running = []
+    for entry in registry.model_registry.all():
+        if entry.get("status") != registry.STATUS_RUNNING:
+            continue
+        engine = registry.validate_engine(entry.get("engine", registry.ENGINE_VLLM))
+        server = llamacpp_server if engine == registry.ENGINE_LLAMACPP else vllm_server
+        if server is llamacpp_server:
+            is_live = server.is_running(entry, registry.model_registry)
+        else:
+            is_live = server.is_running(entry)
+        if is_live:
+            running.append(entry)
+        else:
+            try:
+                server.stop(entry["name"], registry.model_registry)
+            except Exception:
+                registry.model_registry.update(
+                    entry["name"],
+                    status=registry.STATUS_ERROR,
+                    server={**(entry.get("server") or {}), "status": "error", "pid": None, "port": None},
+                    last_error="Model server health check failed and shutdown could not be confirmed",
+                )
+    return running
 
 
 def _local_model_port(model: str) -> Optional[int]:
@@ -41,11 +61,8 @@ def _local_model_port(model: str) -> Optional[int]:
 
 
 def _is_registry_model(model: str) -> bool:
-    try:
-        from services.model_manager.registry import model_registry
-        return model_registry.get(model) is not None
-    except Exception:
-        return False
+    from services.model_manager.registry import model_registry
+    return model_registry.get(model) is not None
 
 MODELS = [
     {
@@ -82,13 +99,20 @@ async def health():
 
 @app.get("/v1/models")
 async def list_models():
-    entries = list(MODELS)
-    known = {entry["id"] for entry in entries}
-    for entry in _registry_running_models():
-        name = entry.get("name")
-        if name and name not in known:
-            entries.append({"id": name, "object": "model", "created": int(time.time()), "owned_by": "local-vllm"})
-    return {"object": "list", "data": entries}
+    try:
+        entries = list(MODELS)
+        known = {entry["id"] for entry in entries}
+        for entry in _registry_running_models():
+            name = entry.get("name")
+            if name and name not in known:
+                engine = entry.get("engine", "vllm")
+                entries.append({
+                    "id": name, "object": "model", "created": int(time.time()),
+                    "owned_by": "local-llamacpp" if engine == "llamacpp" else "local-vllm",
+                })
+        return {"object": "list", "data": entries}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Local model registry unavailable") from exc
 
 def simulate_chat_completion(messages: list, model: str = "fast-model") -> str:
     """Generates simulated model completions for dev/test without physical GPUs."""
@@ -165,8 +189,12 @@ async def chat_completions(request: Request):
     stream = body.get("stream", False)
 
     # 1. Route a locally-managed model to its own vLLM instance, else proxy upstream.
-    local_port = _local_model_port(model)
-    if local_port is None and _is_registry_model(model):
+    try:
+        local_port = _local_model_port(model)
+        registered = _is_registry_model(model)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Local model registry unavailable") from exc
+    if local_port is None and registered:
         raise HTTPException(status_code=503, detail=f"Model '{model}' is registered but not running")
 
     upstream_base = f"http://127.0.0.1:{local_port}/v1" if local_port else (

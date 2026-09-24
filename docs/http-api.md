@@ -239,20 +239,20 @@ Returns the record for an admin or the owning user; others receive `404`.
 ### Model manager (agent platform)
 
 Admin only (`403` for other authenticated users, `401` anonymous). Registers
-HuggingFace repos, downloads snapshots and controls a local vLLM server per
-model. Full lifecycle, flags and limitations are in
+HuggingFace repos, downloads snapshots or selected GGUF files, and controls a
+local vLLM or llama.cpp server per model. Full lifecycle, flags and limitations are in
 [model-management.md](model-management.md).
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/models` | List registered models with status/server info. |
 | GET | `/api/v1/models/{name}` | One model plus its download-job status. |
-| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, quantization?, max_model_len?, tensor_parallel_size?, gpu_memory_utilization?}` → `201`. |
-| POST | `/api/v1/models/{name}/download` | Start a background snapshot download → `202`. |
-| POST | `/api/v1/models/{name}/start` | Start the vLLM server → `202`. |
-| POST | `/api/v1/models/{name}/stop` | Stop the vLLM server (`409` while starting only if already running). |
+| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, engine?}` → `201`. `engine="llamacpp"` requires a `gguf_file` basename; optional `ctx_size`, `n_gpu_layers`, and `flash_attn`. |
+| POST | `/api/v1/models/{name}/download` | Start a background snapshot or single-GGUF download → `202`. |
+| POST | `/api/v1/models/{name}/start` | Start the configured vLLM or llama.cpp server → `202`. |
+| POST | `/api/v1/models/{name}/stop` | Stop the configured model server. |
 | POST | `/api/v1/models/{name}/restart` | Stop then start → `202`. |
-| GET | `/api/v1/models/{name}/logs?tail=` | Tail the vLLM log (`tail` clamped 1 KiB–256 KiB). |
+| GET | `/api/v1/models/{name}/logs?tail=` | Tail the selected engine log (`tail` clamped 1 KiB–256 KiB). |
 | DELETE | `/api/v1/models/{name}?delete_files=0\|1` | Unregister (optionally delete files); `409` while running. |
 
 `400` on invalid repo/name/revision or parameters, `404` unknown model, `409` on

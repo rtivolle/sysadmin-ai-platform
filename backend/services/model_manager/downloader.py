@@ -90,10 +90,36 @@ def _default_snapshot_fn(**kwargs: Any) -> str:
     return snapshot_download(**kwargs)
 
 
+def _default_file_download_fn(**kwargs: Any) -> str:
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(**kwargs)
+
+
+def _verify_gguf_download(path: str, target: str, filename: str) -> str:
+    """Require the selected model to be a regular file inside its managed dir."""
+    import stat
+
+    root = os.path.realpath(target)
+    expected = os.path.join(root, registry_module.validate_gguf_file(filename))
+    downloaded = os.path.abspath(os.fspath(path))
+    try:
+        if os.path.commonpath((downloaded, root)) != root or downloaded != expected:
+            raise ValueError("Downloaded GGUF path is outside the managed model directory")
+        metadata = os.stat(downloaded, follow_symlinks=False)
+    except (OSError, ValueError) as exc:
+        raise ValueError("Downloaded GGUF file is missing or unsafe") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("Downloaded GGUF must be a regular file, not a symlink")
+    if os.path.realpath(downloaded) != downloaded:
+        raise ValueError("Downloaded GGUF resolves outside its managed path")
+    return downloaded
+
+
 def download_sync(
     name: str,
     store: registry_module.ModelRegistry,
     snapshot_fn: Optional[Callable[..., str]] = None,
+    file_download_fn: Optional[Callable[..., str]] = None,
     min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
 ) -> Dict[str, Any]:
     """Run one download to completion, updating the registry. Raises on failure."""
@@ -112,13 +138,25 @@ def download_sync(
     try:
         os.makedirs(target, exist_ok=True)
         os.chmod(target, 0o700)
-        downloader = snapshot_fn or _default_snapshot_fn
-        downloader(
-            repo_id=entry["hf_repo"],
-            revision=entry.get("revision"),
-            local_dir=target,
-            token=resolve_token(),
-        )
+        if entry.get("engine", registry_module.ENGINE_VLLM) == registry_module.ENGINE_LLAMACPP:
+            filename = registry_module.validate_gguf_file(entry.get("gguf_file"))
+            downloader = file_download_fn or _default_file_download_fn
+            downloaded_path = downloader(
+                repo_id=entry["hf_repo"],
+                filename=filename,
+                revision=entry.get("revision"),
+                local_dir=target,
+                token=resolve_token(),
+            )
+            _verify_gguf_download(downloaded_path, target, filename)
+        else:
+            downloader = snapshot_fn or _default_snapshot_fn
+            downloader(
+                repo_id=entry["hf_repo"],
+                revision=entry.get("revision"),
+                local_dir=target,
+                token=resolve_token(),
+            )
         size = dir_size(target)
         return store.update(
             name,
@@ -132,9 +170,14 @@ def download_sync(
         raise
 
 
-def _run_job(name: str, store: registry_module.ModelRegistry, snapshot_fn: Optional[Callable[..., str]]) -> None:
+def _run_job(
+    name: str,
+    store: registry_module.ModelRegistry,
+    snapshot_fn: Optional[Callable[..., str]],
+    file_download_fn: Optional[Callable[..., str]],
+) -> None:
     try:
-        download_sync(name, store, snapshot_fn=snapshot_fn)
+        download_sync(name, store, snapshot_fn=snapshot_fn, file_download_fn=file_download_fn)
     except Exception as exc:
         with _JOBS_LOCK:
             if name in _JOBS:
@@ -149,6 +192,7 @@ def start_download(
     name: str,
     store: registry_module.ModelRegistry,
     snapshot_fn: Optional[Callable[..., str]] = None,
+    file_download_fn: Optional[Callable[..., str]] = None,
 ) -> Dict[str, Any]:
     """Start a background download. One in-flight job per model."""
     if store.get(name) is None:
@@ -158,7 +202,7 @@ def start_download(
         if current and current.get("status") == "downloading":
             raise RuntimeError(f"download already running for '{name}'")
         _JOBS[name] = {"status": "downloading", "started_at": time.time(), "error": None, "finished_at": None}
-    thread = threading.Thread(target=_run_job, args=(name, store, snapshot_fn), daemon=True)
+    thread = threading.Thread(target=_run_job, args=(name, store, snapshot_fn, file_download_fn), daemon=True)
     thread.start()
     return job_status(name)
 
