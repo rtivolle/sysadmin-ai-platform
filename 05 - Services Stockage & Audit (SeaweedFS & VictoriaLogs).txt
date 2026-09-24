@@ -1,0 +1,63 @@
+05 - Services Stockage & Audit : SeaweedFS & VictoriaLogs
+
+Rôle : Stockage objet S3 compatible local, espaces de travail sécurisés et journalisation médico-légale d'audit.
+
+Technologies : SeaweedFS (Apache 2.0) + VictoriaLogs (Apache 2.0).
+
+Licence : 100 % Open Source permissive (aucune contrainte AGPLv3).
+
+1. Service de Stockage Objet : SeaweedFS (Apache 2.0)
+
+Pour le partage de volumineux artefacts, dumps de bases de données, journaux compressés et documentation d'exploitation (runbooks), SeaweedFS est retenu à la place de MinIO pour garantir une licence permissive Apache 2.0 sans risque juridique lié à l'AGPLv3 :
+
+Vitesse & Empreinte : Écrit en Go, extrêmement rapide pour les petits fichiers comme pour les gros volumes, consomme moins de 200 Mo de RAM.
+
+Buckets S3 Dédiés :
+
+s3://runbooks/ : Dépôt central des procédures d'exploitation et documentations Markdown/PDF accessibles aux agents.
+
+s3://sysadmin-dumps/ : Stockage des captures réseau, dumps de crash et exports de configuration.
+
+s3://agent-artifacts/ : Scripts générés et rapports d'intervention horodatés.
+
+Espaces de Travail POSIX Locaux : En complément du S3, chaque administrateur dispose d'un répertoire machine monté sous /data/workspaces/{sysadmin_id} avec droits d'accès stricts 0700 (seul l'utilisateur propriétaire et son agent peuvent y lire et écrire).
+
+2. Service d'Audit et de Traçabilité : VictoriaLogs (Apache 2.0)
+
+L'exploitation d'agents d'intelligence artificielle sur une infrastructure de production impose une traçabilité médico-légale immuable :
+
+Pourquoi VictoriaLogs : Consomme jusqu'à 10 fois moins de RAM et 4 fois moins d'espace disque qu'Elasticsearch ou Grafana Loki. Licence 100 % Apache 2.0.
+
+Traçabilité des Actions d'Agents : Chaque interaction est capturée en JSON structuré :
+
+Identifiant du sysadmin (ex: sysadmin-03).
+
+Requête initiale et intention qualifiée.
+
+Commandes shell formulées et arguments d'outils.
+
+Statut d'approbation humaine (Approuvé / Rejeté / Auto-validé).
+
+Code de retour de commande et temps d'exécution en millisecondes.
+
+Nombre de tokens consommés (prompt et génération).
+
+3. Déploiement Docker : docker-compose.aux.yml
+
+services:  # 1. SeaweedFS Master, Volume, Filer et S3 Gateway (Tout-en-un léger)  seaweedfs:    image: chrislusf/seaweedfs:latest    container_name: seaweedfs-storage    restart: unless-stopped    ports:      - "8333:8333"  # Passerelle S3 API      - "9333:9333"  # Master API      - "8888:8888"  # Filer HTTP    volumes:      - /opt/seaweedfs/data:/data    command: "server -dir=/data -s3"  # 2. VictoriaLogs (Base de données de logs haute performance)  victorialogs:    image: victoriametrics/victoria-logs:v1.0.0    container_name: victorialogs-audit    restart: unless-stopped    ports:      - "127.0.0.1:9428:9428"    volumes:      - /opt/victorialogs/data:/vl-data    command:      - "-storageDataPath=/vl-data"      - "-retentionPeriod=90d"  # Rétention légale 90 jours      - "-httpListenAddr=:9428"
+
+4. Exemple d'Ingestion d'un Événement d'Audit
+
+Le runtime DeepSeek Harness expédie chaque action exécutée vers VictoriaLogs en une seule requête HTTP POST :
+
+curl -X POST 'http://127.0.0.1:9428/insert/jsonline?_stream_fields=service,user_id&_time_field=timestamp' \  -H 'Content-Type: application/stream+json' \  -d '{    "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'",    "service": "dsh-agent",    "user_id": "sysadmin-02",    "session_id": "sess-8942-fpm-incident",    "tool_name": "bash",    "command": "systemctl restart php8.2-fpm",    "human_approved": true,    "exit_code": 0,    "duration_ms": 320,    "tokens_prompt": 1420,    "tokens_completion": 180  }'
+
+5. Requêtes d'Investigation avec LogsQL
+
+VictoriaLogs fournit le moteur de recherche LogsQL pour retrouver instantanément n'importe quelle intervention passée :
+
+Toutes les commandes ayant nécessité une approbation humaine aujourd'hui :service:dsh-agent AND human_approved:true
+
+Toutes les interventions de l'administrateur sysadmin-05 sur le service Nginx :user_id:sysadmin-05 AND command:~"nginx"
+
+Recherche d'erreurs d'exécution d'outils (code de retour != 0) :service:dsh-agent AND exit_code:!0

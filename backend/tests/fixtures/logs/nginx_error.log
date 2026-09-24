@@ -1,0 +1,7 @@
+2026-09-23 10:14:01 [notice] 1420#1420: using the "epoll" event method
+2026-09-23 10:14:01 [notice] 1420#1420: nginx/1.24.0
+2026-09-23 10:14:01 [notice] 1420#1420: OS: Linux 6.8.0-sysadmin
+2026-09-23 10:15:30 [warn] 1423#1423: *118 an upstream response is buffered to a temporary file
+2026-09-23 10:15:32 [error] 1423#1423: *120 connect() to 127.0.0.1:9000 failed (111: Connection refused) while connecting to upstream, client: 192.168.1.50, server: ops.sysadmin.internal, request: "GET /api/v1/data HTTP/1.1", upstream: "fastcgi://127.0.0.1:9000", host: "ops.sysadmin.internal"
+2026-09-23 10:15:33 [error] 1423#1423: *122 connect() to 127.0.0.1:9000 failed (111: Connection refused) while connecting to upstream, client: 192.168.1.51, server: ops.sysadmin.internal, request: "GET /api/v1/data HTTP/1.1", upstream: "fastcgi://127.0.0.1:9000", host: "ops.sysadmin.internal"
+2026-09-23 10:16:00 [notice] 1420#1420: signal 17 (SIGCHLD) received from 1423

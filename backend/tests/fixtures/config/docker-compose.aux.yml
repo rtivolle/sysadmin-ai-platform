@@ -1,0 +1,19 @@
+version: '3.8'
+services:
+  victorialogs:
+    image: victoriametrics/victoria-logs:v0.25.0
+    container_name: victorialogs
+    ports:
+      - "9428:9428"
+    volumes:
+      - ./backend/data/victorialogs:/vl-data
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    container_name: seaweedfs
+    ports:
+      - "8333:8333"
+      - "9333:9333"

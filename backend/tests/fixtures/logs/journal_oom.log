@@ -1,0 +1,15 @@
+[ 1420.104920] systemd-journald[412]: Suppressed 42 messages from sysadmin-worker.service
+[ 1420.105100] kernel: sysadmin-worker invoked oom-killer: gfp_mask=0x1100cca(GFP_HIGHUSER_MOVABLE), order=0, oom_score_adj=0
+[ 1420.105115] kernel: CPU: 3 PID: 8410 Comm: sysadmin-worker Not tainted 6.8.0-sysadmin #1
+[ 1420.105120] kernel: Hardware name: Mila Sysadmin Server Pro/Standard, BIOS 2.4.0 01/15/2026
+[ 1420.105125] kernel: Call Trace:
+[ 1420.105130] kernel:  dump_header+0x4a/0x1e0
+[ 1420.105135] kernel:  oom_kill_process+0x102/0x240
+[ 1420.105140] kernel:  out_of_memory+0x215/0x4e0
+[ 1420.105150] kernel: Tasks state (memory values in pages):
+[ 1420.105160] kernel: [  pid  ]   uid  tgid total_vm      rss pgtables_bytes swapents oom_score_adj name
+[ 1420.105170] kernel: [   1200]     0  1200    12400     1100        98304        0             0 systemd-journal
+[ 1420.105180] kernel: [   8410]  1001  8410   240000    35000      1843200        0             0 sysadmin-worker
+[ 1420.105190] kernel: [   8492]  1001  8492  1048576   917504      8388608        0             0 python3
+[ 1420.105210] kernel: Out of memory: Killed process 8492 (python3) total-vm:4194304kB, anon-rss:3670016kB, file-rss:2048kB, shmem-rss:0kB, UID:1001 pgtables:8192kB oom_score_adj:0
+[ 1420.105220] kernel: oom_reaper: reaped process 8492 (python3), now anon-rss:0kB, file-rss:0kB, shmem-rss:0kB

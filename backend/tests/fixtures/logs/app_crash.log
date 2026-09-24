@@ -1,0 +1,5 @@
+2026-09-23T09:11:58.000Z [INFO] Initializing worker connection pool...
+2026-09-23T09:12:00.001Z [ERROR] Worker pool socket leak: open fd count reached 1024 (ulimit ceiling)
+2026-09-23T09:12:00.005Z [FATAL] Error: socket: EMFILE: too many open files
+2026-09-23T09:12:00.010Z [ERROR] Failed to initiate connection: getaddrinfo EAI_AGAIN dns.internal
+2026-09-23T09:12:00.015Z [PANIC] dial tcp: lookup dns.internal on 127.0.0.53:53: read udp: EMFILE: too many open files

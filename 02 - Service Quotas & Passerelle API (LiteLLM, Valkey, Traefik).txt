@@ -1,0 +1,43 @@
+02 - Service Quotas & Passerelle API : LiteLLM, Valkey & Traefik
+
+Rôle : Contrôle d'accès, équité des ressources GPU, gestion des quotas de tokens et sécurisation TLS.
+
+Technologies : LiteLLM Proxy (MIT) + Valkey (BSD-3-Clause) + Traefik (MIT).
+
+Licence : 100 % Open Source permissive (aucune contrainte AGPL).
+
+1. Architecture de Contrôle des Quotas
+
+Pour garantir que 10 administrateurs système puissent utiliser le cluster simultanément sans saturation ni monopolisation de la VRAM, un contrôle à 3 niveaux est déployé :
+
+Plafond de Concurrence : Maximum 2 requêtes en vol simultanées par administrateur. Si un sysadmin lance une tâche longue d'analyse, il peut lancer au plus une commande d'appoint, mais ne peut pas saturer la file d'attente.
+
+Régulation de Débit (Rate Limiting) : Plafonds fixés à 60 requêtes par minute (RPM) et 150 000 tokens par minute (TPM).
+
+Budget Journalier : 2 millions de tokens par utilisateur et par jour, persistés en mémoire dans Valkey (le fork FOSS de Redis sous licence BSD-3-Clause) et réinitialisés chaque nuit à minuit.
+
+Bypass d'Urgence (Incident P1) : Clé d'API prioritaire sk-emergency-incident-p1 exemptée de quota, réservée aux astreintes pour la résolution d'incidents critiques.
+
+2. Fichier de Configuration LiteLLM : litellm_config.yaml
+
+model_list:  # Modèle Rapide (Triage, bash, vérification syntaxe)  - model_name: fast-model    litellm_params:      model: openai/Qwen/Qwen2.5-Coder-14B-Instruct      api_base: http://127.0.0.1:8000/v1      api_key: "none"  # Modèle Principal (Code complexe, diagnostic système)  - model_name: heavy-model    litellm_params:      model: openai/Qwen/Qwen2.5-Coder-32B-Instruct      api_base: http://127.0.0.1:8000/v1      api_key: "none"router_settings:  routing_strategy: "least-busy"  timeout: 120  num_retries: 2general_settings:  database_url: "redis://127.0.0.1:6379/0"  # Endpoint Valkey  master_key: "sk-master-sysadmin-secret-token"litellm_settings:  max_parallel_requests_per_user: 2  default_max_internal_user_budget: 2000.0  # Crédits virtuels  upperbound_for_max_parallel_requests: 10
+
+3. Déploiement Docker : docker-compose.gateway.yml
+
+services:  # Base de données Valkey (Stockage d'état des quotas en mémoire)  valkey:    image: valkey/valkey:7.2-alpine    container_name: valkey-quotas    restart: unless-stopped    ports:      - "127.0.0.1:6379:6379"    volumes:      - /opt/valkey/data:/data    command: valkey-server --appendonly yes --requirepass "valkey-secret-pass"  # Passerelle LiteLLM Proxy  litellm:    image: ghcr.io/berriai/litellm:main-latest    container_name: litellm-proxy    restart: unless-stopped    ports:      - "127.0.0.1:4000:4000"    volumes:      - /opt/litellm/litellm_config.yaml:/app/config.yaml    environment:      - DATABASE_URL=redis://:valkey-secret-pass@valkey:6379/0      - LITELLM_MASTER_KEY=sk-master-sysadmin-secret-token    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]    depends_on:      - valkey  # Passerelle Frontale Traefik (Terminaison TLS & Authentification)  traefik:    image: traefik:v3.1    container_name: traefik-gateway    restart: unless-stopped    ports:      - "80:80"      - "443:443"    volumes:      - /var/run/docker.sock:/var/run/docker.sock:ro      - /opt/traefik/traefik.yml:/etc/traefik/traefik.yml      - /opt/traefik/certs:/etc/certs:ro
+
+4. Script de Provisionnement des Clés Sysadmin
+
+Ce script crée automatiquement une clé d'API pour chaque sysadmin avec ses limites de sécurité :
+
+#!/usr/bin/env bashset -euo pipefailMASTER_KEY="sk-master-sysadmin-secret-token"LITELLM_API="http://127.0.0.1:4000"for i in $(seq -w 1 10); do  USER_ID="sysadmin-${i}"  echo "Provisionnement de la clé pour ${USER_ID}..."    curl -s -X POST "${LITELLM_API}/key/generate" \    -H "Authorization: Bearer ${MASTER_KEY}" \    -H "Content-Type: application/json" \    -d '{      "user_id": "'"${USER_ID}"'",      "models": ["fast-model", "heavy-model"],      "max_parallel_requests": 2,      "tpm_limit": 150000,      "rpm_limit": 60,      "max_budget": 2000,      "metadata": {"team": "sysadmin", "tier": "standard"}    }' | jq -r '.key' > "/opt/dsh/keys/${USER_ID}.key"doneecho "Toutes les clés ont été générées dans /opt/dsh/keys/"
+
+5. Configuration du Bypass d'Urgence (Incident P1)
+
+# Clé d'urgence P1 avec priorité maximale et aucun plafond de concurrencecurl -s -X POST "http://127.0.0.1:4000/key/generate" \  -H "Authorization: Bearer sk-master-sysadmin-secret-token" \  -H "Content-Type: application/json" \  -d '{    "user_id": "emergency-p1-oncall",    "models": ["fast-model", "heavy-model"],    "max_parallel_requests": 6,    "tpm_limit": 500000,    "rpm_limit": 200,    "metadata": {"priority": "P1-CRITICAL"}  }'
+
+6. Diagnostic & Métriques de Consommation
+
+Vérifier le solde d'un administrateur :curl -H "Authorization: Bearer sk-master-sysadmin-secret-token" \  "http://127.0.0.1:4000/user/info?user_id=sysadmin-01"
+
+Erreur HTTP 429 (Rate Limit Exceeded) : Indique à l'administrateur qu'il a dépassé son quota de 2 requêtes simultanées ou son budget de tokens. Le client DSH affiche un message invitant à patienter ou à basculer sur la clé d'urgence en cas d'astreinte.

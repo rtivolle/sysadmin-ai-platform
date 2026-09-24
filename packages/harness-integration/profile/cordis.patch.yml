@@ -1,0 +1,39 @@
+# Sysadmin harness profile layer.
+#
+# Applied after @deepseek-ai/dsh-base, @deepseek-ai/dsh-web-app and the
+# dsh-plugin-sysadmin bundle. This is the deployment layer: it decides where
+# model traffic goes and where the browser surface binds. Plugin behaviour lives
+# in dsh-plugin-sysadmin/cordis.patch.yml.
+#
+# Model traffic is routed through the platform's LiteLLM gateway so the Python
+# backend owns per-user concurrency, RPM/TPM and daily-token enforcement. The
+# per-user virtual key is read from SYSADMIN_LITELLM_KEY, which the multi-user
+# gateway sets in each user's process environment — no key is stored here.
+
+- id: llm-pi-ai
+  config:
+    providers:
+      litellm:
+        displayName: Sysadmin LiteLLM Gateway
+        apiKeyEnv: SYSADMIN_LITELLM_KEY
+        api: openai-completions
+        baseURL: !!js process.env.SYSADMIN_LITELLM_URL ?? 'http://127.0.0.1:4000/v1'
+        models:
+          - id: heavy-model
+            name: Heavy Model
+            contextWindow: 32768
+          - id: fast-model
+            name: Fast Model
+            contextWindow: 32768
+
+# Every new session starts on the backend-routed alias.
+- id: agent-default-model
+  config:
+    provider: litellm
+    model: !!js process.env.SYSADMIN_DEFAULT_MODEL ?? 'heavy-model'
+
+# One instance per user, so the bind host/port are per-process environment.
+- id: webserver
+  config:
+    host: !!js process.env.SYSADMIN_HARNESS_HOST ?? '127.0.0.1'
+    port: !!js Number(process.env.SYSADMIN_HARNESS_PORT ?? '3080')

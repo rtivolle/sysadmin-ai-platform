@@ -1,0 +1,9 @@
+model_list:
+  - model_name: fast-model
+    litellm_params:
+      model: openai/Qwen/Qwen2.5-Coder-14B-Instruct
+      api_base: http://127.0.0.1:8000/v1
+      api_key: mock-key
+      rpm: 60
+      tpm: 150000
+      max_parallel_requests: 2

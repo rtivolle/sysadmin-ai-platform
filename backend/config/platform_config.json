@@ -1,0 +1,7 @@
+{
+  "num_users": 10,
+  "traefik_port": 8080,
+  "max_parallel_requests": 2,
+  "rpm_limit": 60,
+  "daily_token_budget": 2000000
+}

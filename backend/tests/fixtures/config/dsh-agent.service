@@ -1,0 +1,15 @@
+[Unit]
+Description=DeepSeek Harness Sysadmin Agent Service
+After=network.target valkey.service
+
+[Service]
+Type=simple
+User=sysadmin
+WorkingDirectory=/opt/sysadmin-platform
+ExecStart=/usr/bin/python3 -m backend.services.agent_tools.server
+LimitNOFILE=65535
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

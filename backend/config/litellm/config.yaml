@@ -1,0 +1,29 @@
+# LiteLLM Configuration
+model_list:
+  - model_name: fast-model
+    litellm_params:
+      model: openai/Qwen/Qwen2.5-Coder-14B-Instruct
+      api_base: http://127.0.0.1:8000/v1
+      api_key: "none"
+
+  - model_name: heavy-model
+    litellm_params:
+      model: openai/Qwen/Qwen2.5-Coder-32B-Instruct
+      api_base: http://127.0.0.1:8000/v1
+      api_key: "none"
+
+router_settings:
+  routing_strategy: "least-busy"
+  timeout: 120
+  num_retries: 2
+
+general_settings:
+  custom_auth: "backend.services.auth_gateway.litellm_auth.sysadmin_custom_auth"
+
+litellm_settings:
+  max_parallel_requests_per_user: 2
+  default_max_internal_user_budget: 2000.0
+  upperbound_for_max_parallel_requests: 10
+  telemetry: false
+  callbacks:
+    - "backend.services.auth_gateway.litellm_auth.proxy_handler_instance"

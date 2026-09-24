@@ -1,0 +1,121 @@
+00 - Plan Directeur & Architecture Globale
+
+Projet : Plateforme d'Inférence IA et d'Automatisation pour Administrateurs Système
+
+Infrastructure : 8× NVIDIA Quadro RTX 8000 (384 Go VRAM GDDR6 ECC totale)
+
+Utilisateurs : 10 Administrateurs Système avec sessions concurrentes
+
+Licence globale : 100 % Open Source (FOSS - Apache 2.0 / MIT / BSD / LGPL)
+
+1. Vision et Objectifs du Système
+
+Le projet fournit une infrastructure locale complète d'intelligence artificielle agentique dédiée aux opérations d'administration système : diagnostic d'incidents, analyse ciblée de journaux de plusieurs gigaoctets, vérification et génération de scripts (Bash, Ansible, Terraform), et consultation automatisée de runbooks d'exploitation.
+
+Principes d'ingénierie non négociables :
+
+Souveraineté et sécurité absolue : Aucun flux ni jeton de données ne transite vers un cloud public tiers. Tous les modèles et composants tournent sur site (on-premise).
+
+Sécurité par confinement : Les commandes formulées par l'agent sont exécutées dans un bac à sable hermétique (Bubblewrap) sans accès root, avec réseau coupé par défaut et validation humaine interactive (Human-in-the-Loop) sur toute action modificatrice.
+
+Équité des ressources : Concurrence plafonnée à 2 requêtes en vol par sysadmin pour éviter la monopolisation du cache mémoire GPU.
+
+2. Cartographie Globale des Services & Licences
+
+Module
+
+Service / Technologie
+
+Licence
+
+Port / Protocole
+
+Fichier Dédié
+
+Inférence Distribuée
+
+NVIDIA Dynamo + vLLM
+
+Apache 2.0
+
+TCP 8000 (HTTP OpenAI API)
+
+01 - Service Inférence
+
+Quotas & Concurrence
+
+LiteLLM Proxy + Valkey
+
+MIT / BSD-3
+
+TCP 4000 (LiteLLM) / 6379 (Valkey)
+
+02 - Service Quotas & API
+
+Passerelle Frontale
+
+Traefik (TLS + Auth LDAP)
+
+MIT
+
+TCP 80, 443 (HTTPS)
+
+02 - Service Quotas & API
+
+Runtime Agentique
+
+DeepSeek Harness (dsh)
+
+MIT
+
+TCP 3080 (Web UI / WebSocket)
+
+03 - Service Agent & Outils
+
+Confinement Système
+
+Bubblewrap + cgroups v2
+
+LGPL-2.0+
+
+Exécution locale système
+
+04 - Service Sécurité
+
+Stockage Fichiers / S3
+
+SeaweedFS + POSIX
+
+Apache 2.0
+
+TCP 8333 (S3 API) / 9333 (Master)
+
+05 - Services Auxiliaires
+
+Audit & Traçabilité
+
+VictoriaLogs
+
+Apache 2.0
+
+TCP 9428 (HTTP LogsQL)
+
+05 - Services Auxiliaires
+
+3. Flux Réseau et Architecture en 4 Couches
+
+[ 10 Postes Sysadmin ] (Navigateur Web, Terminal SSH, CLI)           │           ▼ (HTTPS / WSS - Port 443)┌────────────────────────────────────────────────────────────────────────┐│ 1. Passerelle d'Accès : Traefik                                        ││    • Terminaison TLS / Certificats locaux                              ││    • Authentification SSO (LDAP / OIDC / PAM) pour les 10 sysadmins    │└──────────────────────────────────┬─────────────────────────────────────┘                                   │                                   ▼ (HTTP interne - Port 3080)┌────────────────────────────────────────────────────────────────────────┐│ 2. Runtime Agent : DeepSeek Harness (dsh)                              ││    • Profil Cordis 'sysadmin' & Sessions utilisateurs isolées          ││    • Outils : search_log_stream, config_lint_and_diff, safe_editor     ││    • Confinement : Bubblewrap (bwrap) + cgroups v2                     ││    • Sas de sécurité Human-in-the-Loop pour commandes modificatrices   │└──────────────────────────────────┬─────────────────────────────────────┘                                   │                                   ▼ (HTTP OpenAI API - Port 4000)┌────────────────────────────────────────────────────────────────────────┐│ 3. Gestionnaire de Quotas : LiteLLM Proxy + Valkey                     ││    • Plafond strict : 2 requêtes simultanées / sysadmin                ││    • Limites : 60 RPM, 150k TPM, 2M tokens/jour par sysadmin           ││    • Clé prioritaire d'urgence P1 (Incident majeur)                    │└──────────────────────────────────┬─────────────────────────────────────┘                                   │                                   ▼ (HTTP OpenAI API - Port 8000)┌────────────────────────────────────────────────────────────────────────┐│ 4. Moteur d'Inférence : NVIDIA Dynamo + vLLM                           ││    • Frontend Dynamo avec routage sensible au KV-Cache (KV-Aware)      ││    • Pool Prefill (GPUs 0,1 - TP=2) : Ingestion rapide des contextes   ││    • Pool Decode (GPUs 2..5 - TP=4) : Génération fluide (modèle 32B)   ││    • Pool Rapide (GPUs 6,7 - TP=2) : Modèle 14B pour tâches courantes  │└────────────────────────────────────────────────────────────────────────┘
+
+4. Feuille de Route Globale de Déploiement
+
+Étape 1 (Socle Hôte) : Configuration des pilotes NVIDIA (>=535), mode persistance activé (nvidia-smi -pm 1), validation de l'interconnexion PCIe/NVLink (nvidia-smi topo -m).
+
+Étape 2 (Stockage & Audit) : Déploiement des conteneurs SeaweedFS (stockage S3 des runbooks) et VictoriaLogs (collecte d'audit des actions agents).
+
+Étape 3 (Moteur d'Inférence) : Déploiement de la pile NVIDIA Dynamo et des conteneurs vLLM configurés en FP16. Vérification du routage KV-Aware.
+
+Étape 4 (Contrôle & Quotas) : Lancement de LiteLLM Proxy et Valkey. Provisionnement des 10 clés virtuelles d'administrateurs et de la clé de secours P1.
+
+Étape 5 (Agent & Sandboxing) : Compilation de DeepSeek Harness avec profil Cordis sysadmin, configuration du script Bubblewrap et tests de rejet des commandes destructrices.
+
+Étape 6 (Recette Opérationnelle) : Simulation d'incident en conditions réelles avec 10 utilisateurs simultanés.

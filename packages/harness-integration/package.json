@@ -1,0 +1,13 @@
+{
+  "name": "sysadmin-harness-integration",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Custom DeepSeek Harness integration for the sysadmin AI platform: profile, backend-wiring plugin, and multi-user login gateway.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

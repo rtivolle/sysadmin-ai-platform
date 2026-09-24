@@ -1,0 +1,32 @@
+{
+  "name": "dsh-plugin-sysadmin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Custom DeepSeek Harness bundle that wires the harness to the sysadmin platform backend (command policy guard, audit sink, backend tool bridge).",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./policy": "./lib/policy.js",
+    "./audit": "./lib/audit.js",
+    "./backend": "./lib/backend.js"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

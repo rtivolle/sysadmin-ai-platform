@@ -1,0 +1,89 @@
+01 - Service Inférence : NVIDIA Dynamo & vLLM
+
+Rôle : Moteur de calcul distribué haute performance pour modèles d'agents sysadmin.
+
+Technologies : NVIDIA Dynamo (Orchestrateur & Routeur KV-Aware) + vLLM (Moteur PagedAttention).
+
+Licence : 100 % Open Source (Apache 2.0).
+
+Matériel : 8× NVIDIA Quadro RTX 8000 (48 Go VRAM GDDR6 ECC chacune = 384 Go VRAM au total).
+
+1. Principes Techniques et Avantages de NVIDIA Dynamo
+
+Plutôt que d'exécuter une instance vLLM isolée ou de scinder maladroitement les requêtes, NVIDIA Dynamo apporte une orchestration datacenter distribuée au-dessus de vLLM :
+
+Routage sensible au cache KV (KV-Aware Routing) : Lors d'échanges itératifs dans une session d'agent (ex. diagnostic d'un incident système avec plusieurs requêtes consécutives), Dynamo route automatiquement les requêtes vers le GPU détenant déjà l'historique en cache KV. Cela réduit le Time-To-First-Token (TTFT) de plus de 50 %.
+
+Désagrégation Prefill / Decode (P/D Disaggregation) : La phase de calcul intensif (ingestion de gros fichiers logs) est assignée à un groupe de GPU (Prefill), tandis que la phase de génération séquentielle token par token est assignée à un autre groupe (Decode).
+
+KV Block Manager (KVBM) : Gestion multi-niveaux du cache KV permettant de décharger les contextes inactifs de la mémoire GPU vers la RAM centrale du serveur pour libérer la VRAM.
+
+2. Spécificités Matérielles de l'Architecture Turing (TU102)
+
+Compute Capability : 7.5 (Turing TU102).
+
+Contrainte matérielle majeure : Turing ne prend pas en charge les calculs matériels en bfloat16 ni en FP8.
+
+Règle d'or vLLM : Vous devez impérativement configurer vLLM avec le paramètre --dtype float16 (ou utiliser des modèles quantifiés en AWQ INT4). Tenter de charger un modèle en bfloat16 entraînera une dégradation logicielle massive ou un crash CUDA.
+
+3. Partitionnement Optimal des 8 GPU RTX 8000
+
+Groupe
+
+Cartes GPU
+
+VRAM Totale
+
+Modèle Assigné
+
+Rôle Opérationnel
+
+Pool Prefill
+
+GPUs 0, 1 (TP=2)
+
+96 Go
+
+Qwen2.5-Coder-32B (FP16)
+
+Ingestion et pré-calcul ultra-rapide des prompts longs, logs et configs.
+
+Pool Decode
+
+GPUs 2, 3, 4, 5 (TP=4)
+
+192 Go
+
+Qwen2.5-Coder-32B (FP16)
+
+Génération fluide de code, raisonnement et scripts complexes (~128 Go VRAM réservés pour le cache KV).
+
+Pool Rapide
+
+GPUs 6, 7 (TP=2)
+
+96 Go
+
+Qwen2.5-Coder-14B (FP16)
+
+Triage initial, autocomplétion bash, syntaxe, formatage JSON/YAML.
+
+4. Fichier de Déploiement : docker-compose.dynamo.yml
+
+services:  # 1. Frontend Dynamo : Point d'accès OpenAI API & Routeur KV-Aware  dynamo-frontend:    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest    container_name: dynamo-frontend    network_mode: host    restart: unless-stopped    command: >      python3 -m dynamo.frontend      --http-port 8000      --discovery-backend file      --router-mode kv-aware      --no-router-kv-events    depends_on:      - dynamo-worker-prefill      - dynamo-worker-decode      - dynamo-worker-fast  # 2. Worker vLLM dédié au Prefill (GPUs 0, 1)  dynamo-worker-prefill:    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest    container_name: dynamo-worker-prefill    runtime: nvidia    network_mode: host    restart: unless-stopped    environment:      - CUDA_VISIBLE_DEVICES=0,1    volumes:      - /opt/models/cache:/root/.cache/huggingface    command: >      python3 -m dynamo.vllm      --model Qwen/Qwen2.5-Coder-32B-Instruct      --tensor-parallel-size 2      --dtype float16      --max-model-len 32768      --gpu-memory-utilization 0.90      --discovery-backend file      --role prefill    ipc: host  # 3. Worker vLLM dédié au Decode (GPUs 2, 3, 4, 5)  dynamo-worker-decode:    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest    container_name: dynamo-worker-decode    runtime: nvidia    network_mode: host    restart: unless-stopped    environment:      - CUDA_VISIBLE_DEVICES=2,3,4,5    volumes:      - /opt/models/cache:/root/.cache/huggingface    command: >      python3 -m dynamo.vllm      --model Qwen/Qwen2.5-Coder-32B-Instruct      --tensor-parallel-size 4      --dtype float16      --max-model-len 32768      --gpu-memory-utilization 0.90      --discovery-backend file      --role decode    ipc: host  # 4. Worker d'appoint pour tâches rapides (GPUs 6, 7 - Modèle 14B)  dynamo-worker-fast:    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest    container_name: dynamo-worker-fast    runtime: nvidia    network_mode: host    restart: unless-stopped    environment:      - CUDA_VISIBLE_DEVICES=6,7    volumes:      - /opt/models/cache:/root/.cache/huggingface    command: >      python3 -m dynamo.vllm      --model Qwen/Qwen2.5-Coder-14B-Instruct      --tensor-parallel-size 2      --dtype float16      --max-model-len 16384      --gpu-memory-utilization 0.90      --discovery-backend file    ipc: host
+
+5. Procédure d'Installation et Validation
+
+Prérequis hôte :# Activer la persistance GPU pour éliminer la latence d'initialisation CUDAsudo nvidia-smi -pm 1# Vérifier la topologie d'interconnexion (PCIe / NVLink)nvidia-smi topo -m
+
+Lancement des conteneurs :docker compose -f docker-compose.dynamo.yml up -d
+
+Test de santé de l'API Dynamo :curl -X GET http://127.0.0.1:8000/v1/models
+
+Test d'inférence avec streaming :curl -X POST http://127.0.0.1:8000/v1/chat/completions \  -H "Content-Type: application/json" \  -d '{    "model": "Qwen/Qwen2.5-Coder-32B-Instruct",    "messages": [{"role": "user", "content": "Écris un script bash sécurisé pour sauvegarder PostgreSQL avec horodatage."}],    "temperature": 0.2  }'
+
+6. Surveillance & Dépannage
+
+Saturation VRAM (CUDA Out Of Memory) : Si le taux d'utilisation dépasse 95 %, abaisser --gpu-memory-utilization à 0.85 ou réduire --max-model-len à 24576.
+
+Surveillance du cache KV en temps réel : Interroger les métriques Prometheus exposées sur http://127.0.0.1:8000/metrics (compteurs vllm:num_requests_waiting et vllm:gpu_cache_usage_factor).

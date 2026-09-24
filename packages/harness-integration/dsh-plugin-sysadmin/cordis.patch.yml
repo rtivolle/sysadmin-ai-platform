@@ -1,0 +1,22 @@
+# dsh-plugin-sysadmin bundle patch.
+#
+# Inserted after the dsh-base and dsh-web-app layers. Every value comes from the
+# process environment because the multi-user gateway launches ONE harness process
+# per authenticated sysadmin: the environment is the per-user boundary, and the
+# user's LiteLLM virtual key never appears in a configuration file.
+
+- insert:
+    - id: sysadmin-harness
+      name: dsh-plugin-sysadmin
+      config:
+        userId: !!js process.env.SYSADMIN_USER ?? 'unknown'
+        sessionId: !!js process.env.DSH_SESSION_ID ?? ''
+        # Per-user bearer token for backend calls (backend/config/keys/<user>.key).
+        userToken: !!js process.env.SYSADMIN_TOKEN ?? ''
+        backendBaseUrl: !!js process.env.SYSADMIN_BACKEND_URL ?? 'http://127.0.0.1:3080'
+        authUrl: !!js process.env.SYSADMIN_AUTH_URL ?? 'http://127.0.0.1:3081'
+        victoriaLogsUrl: !!js process.env.VICTORIALOGS_URL ?? 'http://127.0.0.1:9428'
+        auditOutboxPath: !!js process.env.SYSADMIN_AUDIT_OUTBOX ?? ''
+        enforceCommandPolicy: true
+        backendToolsEnabled: true
+        auditToolResults: true

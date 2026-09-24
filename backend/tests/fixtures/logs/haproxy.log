@@ -1,0 +1,4 @@
+Sep 23 13:00:00 lb-01 haproxy[1120]: Proxy inference-cluster started.
+Sep 23 13:00:10 lb-01 haproxy[1120]: Health check for server inference-cluster/srv-gpu-02 failed, reason: Layer7 check failed: HTTP 500, code: 500, check duration: 45ms
+Sep 23 13:00:15 lb-01 haproxy[1120]: Server inference-cluster/srv-gpu-02 is DOWN, reason: Layer7 check failed
+Sep 23 13:00:20 lb-01 haproxy[1120]: 10.0.1.20:41200 [23/Sep/2026:13:00:20.100] http-in inference-cluster/<NOSRV> -/-/-/-/+45 503 +212 - - SC-- 1/0/0/0/0 0/0 "POST /v1/chat/completions HTTP/1.1"

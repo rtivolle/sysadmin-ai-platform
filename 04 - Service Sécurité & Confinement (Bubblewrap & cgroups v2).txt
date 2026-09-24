@@ -1,0 +1,69 @@
+04 - Service Sécurité & Confinement : Sandbox Bubblewrap & cgroups v2
+
+Rôle : Confinement hermétique des commandes shell générées par l'agent et prévention de l'escalade de privilèges.
+
+Technologies : Bubblewrap (bwrap - LGPL-2.0+) + Contrôleur cgroups v2 du noyau Linux + Filtre Seccomp-BPF.
+
+Objectif : Latence d'instanciation quasi-nulle (<10 ms) et protection totale du système hôte.
+
+1. Justification Technique de Bubblewrap face à Docker
+
+Critère
+
+Conteneur Docker classique
+
+Bac à Sable Bubblewrap (bwrap)
+
+Latence d'instanciation
+
+1 à 2 secondes (démarrage conteneur)
+
+Moins de 10 millisecondes (appel système direct)
+
+Démon d'arrière-plan
+
+Démon root requis (dockerd)
+
+Aucun démon (exécutable utilisateur sans privilège)
+
+Consommation mémoire
+
+Forte empreinte par instance
+
+Empreinte négligeable (namespaces Linux natifs)
+
+Protection hôte
+
+Risque d'évasion si mal configuré
+
+Hermétique (système de fichiers en lecture seule forcée)
+
+2. Script du Lanceur Confiné : /usr/local/bin/bwrap-runner.sh
+
+#!/usr/bin/env bashset -euo pipefailUSER_WORKSPACE="$1"shiftCMD=("$@")# Vérifier l'existence de l'espace de travailif [ ! -d "$USER_WORKSPACE" ]; then  mkdir -p "$USER_WORKSPACE"fi# Exécution sous Bubblewrap avec isolation complète des namespacesexec /usr/bin/bwrap \  --unshare-all \  --unshare-net \  --die-with-parent \  --ro-bind /usr /usr \  --ro-bind /lib /lib \  --ro-bind /lib64 /lib64 \  --ro-bind /bin /bin \  --ro-bind /sbin /sbin \  --ro-bind /etc/resolv.conf /etc/resolv.conf \  --ro-bind /etc/ssl /etc/ssl \  --proc /proc \  --dev /dev \  --tmpfs /tmp \  --bind "$USER_WORKSPACE" "$USER_WORKSPACE" \  --chdir "$USER_WORKSPACE" \  --cap-drop ALL \  -- "${CMD[@]}"
+
+3. Contrôle des Ressources via cgroups v2
+
+Chaque instance de bac à sable est rattachée à un sous-groupe cgroups v2 sous /sys/fs/cgroup/sysadmin-sandbox/ :
+
+Plafond Mémoire : memory.max = 4G et memory.high = 3.5G. Empêche un script malveillant ou un traitement de log trop lourd de provoquer un OOM-killer sur l'ensemble de la machine hôte.
+
+Plafond Processus (Anti Fork-Bomb) : pids.max = 128. Si l'agent tente une fork bomb ou une boucle infinie de sous-processus, le système refuse immédiatement la création de nouveaux threads.
+
+Quota Processeur : cpu.max = 200000 100000 (équivalent à 2 cœurs physiques réservés au maximum par sandbox).
+
+Gestion des Timeouts : Envoi automatique d'un signal SIGTERM après 15 secondes d'inactivité ou d'exécution, suivi d'un SIGKILL destructif après 20 secondes.
+
+4. Plugin Cordis d'Intégration dans DeepSeek Harness
+
+Fichier plugins/dsh-plugin-sysadmin-sandbox/src/index.ts :
+
+import { Context, Service } from 'cordis';import * as path from 'node:path';export interface SandboxPolicy {  user: string;  workspaceDir: string;  allowNetwork?: boolean;}export class SysadminSandbox extends Service {  constructor(ctx: Context) {    super(ctx, 'sandbox', true);  }  confine(argv: string[], policy: SandboxPolicy): string[] {    const bwrapBin = '/usr/local/bin/bwrap-runner.sh';    const workspace = path.resolve(policy.workspaceDir);    return [bwrapBin, workspace, ...argv];  }}export default function apply(ctx: Context) {  ctx.plugin(SysadminSandbox);}
+
+5. Procédure de Test et Validation de la Sécurité
+
+Test de blocage en écriture sur le système hôte :bwrap-runner.sh /tmp/test-workspace touch /usr/test_file# Résultat attendu : touch: cannot touch '/usr/test_file': Read-only file system
+
+Test d'isolation réseau :bwrap-runner.sh /tmp/test-workspace ping -c 1 8.8.8.8# Résultat attendu : ping: connect: Network is unreachable
+
+Test de neutralisation de fork-bomb :bwrap-runner.sh /tmp/test-workspace bash -c ':(){ :|:& };:'# Résultat attendu : bash: fork: Resource temporarily unavailable (stoppé à 128 PIDs)

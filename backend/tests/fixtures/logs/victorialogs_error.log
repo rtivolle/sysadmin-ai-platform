@@ -1,0 +1,4 @@
+2026-09-23T16:44:50.000Z INFO VictoriaLogs server is running at http://127.0.0.1:9428
+2026-09-23T16:45:00.120Z FATAL cannot create part file: no space left on device; partition: /vl-data
+2026-09-23T16:45:00.121Z ERROR failed to flush in-memory rows to storage part on /vl-data: write /vl-data/parts/20260923: no space left on device
+2026-09-23T16:45:00.125Z PANIC cannot commit transaction: read-only file system remount triggered

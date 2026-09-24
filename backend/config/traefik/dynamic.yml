@@ -1,0 +1,124 @@
+# Traefik Dynamic Configuration - Hardened Production Architecture
+http:
+  middlewares:
+    # 1. Strip any client-supplied spoofed identity headers
+    strip-client-headers:
+      headers:
+        customRequestHeaders:
+          X-User: ""
+          X-Forwarded-User: ""
+          X-Forwarded-Role: ""
+          X-User-Role: ""
+          X-User-Workspace: ""
+
+    # 2. ForwardAuth Middleware querying Auth Gateway
+    auth-forward:
+      forwardAuth:
+        address: "http://127.0.0.1:3081/verify"
+        trustForwardHeader: true
+        authResponseHeaders:
+          - "X-Forwarded-User"
+          - "X-Forwarded-Role"
+          - "X-User"
+          - "X-User-Role"
+          - "X-User-Workspace"
+
+    cors-headers:
+      headers:
+        accessControlAllowMethods:
+          - "GET"
+          - "OPTIONS"
+          - "PUT"
+          - "POST"
+          - "DELETE"
+        accessControlAllowHeaders:
+          - "*"
+        accessControlAllowOriginList:
+          - "*"
+        accessControlMaxAge: 100
+        addVaryHeader: true
+
+  routers:
+    # Dedicated router for Authentication / Login (Unprotected by ForwardAuth)
+    auth-router:
+      entryPoints:
+        - "web"
+      rule: "Path(`/api/v1/auth/login`) || Path(`/api/v1/auth/logout`) || Path(`/auth/login`) || Path(`/auth/logout`) || Path(`/api/v1/auth/verify`) || Path(`/verify`)"
+      service: "auth-service"
+      priority: 100
+      middlewares:
+        - "cors-headers"
+
+    # Agent Tools & Runtime Router (Protected)
+    agent-router:
+      entryPoints:
+        - "web"
+      rule: "PathPrefix(`/agent`) || PathPrefix(`/api`)"
+      service: "agent-service"
+      priority: 50
+      middlewares:
+        - "strip-client-headers"
+        - "auth-forward"
+        - "cors-headers"
+
+    # LiteLLM Proxy Router (Protected)
+    litellm-router:
+      entryPoints:
+        - "web"
+      rule: "PathPrefix(`/v1`) || PathPrefix(`/models`) || PathPrefix(`/user`) || PathPrefix(`/key`)"
+      service: "litellm-service"
+      priority: 50
+      middlewares:
+        - "strip-client-headers"
+        - "auth-forward"
+        - "cors-headers"
+
+    # SeaweedFS S3 Router (Protected)
+    s3-router:
+      entryPoints:
+        - "web"
+      rule: "PathPrefix(`/s3`)"
+      service: "s3-service"
+      priority: 50
+      middlewares:
+        - "strip-client-headers"
+        - "auth-forward"
+        - "cors-headers"
+
+    # VictoriaLogs Audit Router (Protected)
+    audit-router:
+      entryPoints:
+        - "web"
+      rule: "PathPrefix(`/select`) || PathPrefix(`/insert`)"
+      service: "audit-service"
+      priority: 50
+      middlewares:
+        - "strip-client-headers"
+        - "auth-forward"
+        - "cors-headers"
+
+  services:
+    auth-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:3081"
+
+    agent-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:3080"
+
+    litellm-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:4000"
+
+    s3-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8333"
+
+    audit-service:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:9428"

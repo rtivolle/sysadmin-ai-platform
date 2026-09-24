@@ -1,0 +1,36 @@
+# Local Python environments and test artifacts
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Downloaded executables and runtime state
+backend/bin/
+backend/run/
+backend/logs/
+backend/data/valkey/
+backend/data/seaweedfs/
+backend/data/victorialogs/
+backend/data/workspaces/
+backend/data/hardware_inventory.json
+backend/data/hardware_inventory.md
+
+# Generated logs and large test fixtures
+backend/data/logs/
+backend/tests/fixtures/logs/massive_access_5gb.log
+
+# Provisioned secrets
+backend/config/keys/*.key
+backend/config/keys/login-credentials.json
+backend/config/keys/initial-passwords.txt
+*.env
+.env*
+
+# Local agent metadata
+.agents/
+.codex/
+.harness-scratch/
+
+# Test-generated target deployment artifacts
+backend/config/test_deploy/
