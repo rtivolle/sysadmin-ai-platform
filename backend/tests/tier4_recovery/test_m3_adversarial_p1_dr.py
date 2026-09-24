@@ -345,7 +345,7 @@ def test_restore_fails_closed_on_corrupted_manifest_sha256(tmp_path):
     # Unpack, corrupt expected sha256 in manifest.json, repack
     unpack_dir = tmp_path / "unpack_corrupt_manifest"
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(unpack_dir)
+        tar.extractall(unpack_dir, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(unpack_dir)
     root = list(unpack_dir.iterdir())[0]
 
     with open(root / "manifest.json", "r") as f:
@@ -376,7 +376,7 @@ def test_restore_fails_closed_on_tampered_component_file(tmp_path):
 
     unpack_dir = tmp_path / "unpack_tamper_file"
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(unpack_dir)
+        tar.extractall(unpack_dir, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(unpack_dir)
     root = list(unpack_dir.iterdir())[0]
 
     # Tamper with file in seaweedfs or victorialogs
@@ -424,7 +424,7 @@ def test_restore_fails_closed_on_missing_manifest(tmp_path):
 
     unpack_dir = tmp_path / "unpack_no_manifest"
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(unpack_dir)
+        tar.extractall(unpack_dir, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(unpack_dir)
     root = list(unpack_dir.iterdir())[0]
 
     (root / "manifest.json").unlink()
@@ -513,7 +513,7 @@ def test_restore_manager_rejects_missing_component(tmp_path):
 
     unpack_dir = tmp_path / "unpack_missing_valkey"
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(unpack_dir)
+        tar.extractall(unpack_dir, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(unpack_dir)
     root = list(unpack_dir.iterdir())[0]
 
     # Completely remove valkey from unpacked directory & manifest
