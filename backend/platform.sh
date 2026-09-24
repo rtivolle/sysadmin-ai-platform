@@ -21,7 +21,16 @@ VENV_PYTHON="${ROOT_DIR}/.venv/bin/python3"
 VENV_LITELLM="${ROOT_DIR}/.venv/bin/litellm"
 HARNESS_DIR="${ROOT_DIR}/../packages/harness-integration"
 
+# The agent platform defaults to 3080. On a host where the DeepSeek Harness web
+# surface already owns that port, export SYSADMIN_AGENT_PORT=<free port> before
+# `platform.sh start` and point the Traefik agent-service route at the same
+# port (see docs/status/TEST_READY.md).
+AGENT_PORT="${SYSADMIN_AGENT_PORT:-3080}"
+HARNESS_STATE_DIR="${DATA_DIR}/harness"
+
 mkdir -p "$LOGS_DIR" "$RUN_DIR" "$DATA_DIR/valkey" "$DATA_DIR/seaweedfs" "$DATA_DIR/victorialogs"
+
+SERVICE_NAMES="valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik harness_gateway"
 
 is_running() {
   local pid_file="$1"
@@ -102,8 +111,9 @@ status_service() {
   fi
 }
 
-start_all() {
-  umask 077
+# Export the platform secrets and regenerate the runtime Valkey configuration.
+# Called before any service start because LiteLLM and Valkey need them.
+load_secrets() {
   local master_key_file="${CONFIG_DIR}/keys/master.key"
   local valkey_password_file="${CONFIG_DIR}/keys/valkey-password.key"
   if [ ! -s "$master_key_file" ]; then
@@ -121,54 +131,144 @@ start_all() {
   VALKEY_URL="redis://:${VALKEY_PASSWORD}@127.0.0.1:6379/0"
   VALKEY_CONFIG_SOURCE="${CONFIG_DIR}/valkey/valkey.conf" VALKEY_CONFIG_RUNTIME="${RUN_DIR}/valkey.conf" \
     "$VENV_PYTHON" -c 'import os, pathlib; src = pathlib.Path(os.environ["VALKEY_CONFIG_SOURCE"]); dst = pathlib.Path(os.environ["VALKEY_CONFIG_RUNTIME"]); dst.write_text(src.read_text().replace("CONFIGURE_VIA_PLATFORM_SH", os.environ["VALKEY_PASSWORD"])); dst.chmod(0o600)'
+}
+
+# Start one service by name. Secrets must already be loaded (load_secrets).
+start_one() {
+  case "${1:-}" in
+    valkey)
+      start_service "valkey" "${BIN_DIR}/valkey-server" "${RUN_DIR}/valkey.conf"
+      ;;
+    victorialogs)
+      start_service "victorialogs" "${BIN_DIR}/victoria-logs-prod" \
+        "-storageDataPath=${DATA_DIR}/victorialogs" \
+        "-retentionPeriod=90d" \
+        "-httpListenAddr=127.0.0.1:9428"
+      ;;
+    audit_outbox)
+      start_service "audit_outbox" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/agent_tools/audit.py" "--worker"
+      ;;
+    seaweedfs)
+      start_service "seaweedfs" "${BIN_DIR}/weed" "server" \
+        "-dir=${DATA_DIR}/seaweedfs" \
+        "-ip=127.0.0.1" \
+        "-ip.bind=127.0.0.1" \
+        "-master.peers=none" \
+        "-s3" \
+        "-s3.port=8333" \
+        "-master.port=9333" \
+        "-filer.port=8888" \
+        "-volume.port=8085"
+      ;;
+    inference)
+      start_service "inference" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/inference_engine/server.py" 8000
+      ;;
+    auth_gateway)
+      start_service "auth_gateway" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/auth_gateway/server.py" 3081
+      ;;
+    agent_tools)
+      start_service "agent_tools" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/agent_tools/server.py" "$AGENT_PORT"
+      ;;
+    litellm)
+      start_service "litellm" "$VENV_LITELLM" \
+        "--config" "${CONFIG_DIR}/litellm/config.yaml" \
+        "--port" "4000" \
+        "--host" "127.0.0.1" \
+        "--num_workers" "2"
+      ;;
+    traefik)
+      start_service "traefik" "${BIN_DIR}/traefik" \
+        "--configFile=${CONFIG_DIR}/traefik/traefik.yml"
+      ;;
+    harness_gateway)
+      start_harness
+      ;;
+    *)
+      echo "Unknown service: ${1:-<empty>}" >&2
+      echo "Known services: ${SERVICE_NAMES}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Print one service's status line by name.
+status_one() {
+  case "${1:-}" in
+    valkey) status_service "valkey" "6379" ;;
+    victorialogs) status_service "victorialogs" "9428" ;;
+    audit_outbox) status_service "audit_outbox" "-" ;;
+    seaweedfs) status_service "seaweedfs" "8333" ;;
+    inference) status_service "inference" "8000" ;;
+    auth_gateway) status_service "auth_gateway" "3081" ;;
+    agent_tools) status_service "agent_tools" "$AGENT_PORT" ;;
+    litellm) status_service "litellm" "4000" ;;
+    traefik) status_service "traefik" "8080" ;;
+    harness_gateway) status_service "harness_gateway" "3085" ;;
+    *)
+      echo "Unknown service: ${1:-<empty>} (known: ${SERVICE_NAMES})" >&2
+      return 1
+      ;;
+  esac
+}
+
+# The gateway deliberately leaves its harness children running on SIGTERM so a
+# restarted gateway re-adopts them. A full platform stop reaps them from the
+# gateway's registry instead.
+reap_harness_instances() {
+  local registry_dir="${HARNESS_STATE_DIR}/instances"
+  [ -d "$registry_dir" ] || return 0
+  local python_bin="$VENV_PYTHON"
+  if [ ! -x "$python_bin" ]; then
+    python_bin="$(command -v python3 || true)"
+  fi
+  [ -n "$python_bin" ] || return 0
+  local file pid
+  for file in "$registry_dir"/*.json; do
+    [ -e "$file" ] || continue
+    pid=$("$python_bin" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pid") or "")' "$file" 2>/dev/null || true)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "  [-] Stopping harness instance (PID: ${pid})..."
+      kill "$pid" 2>/dev/null || true
+      for _ in $(seq 1 20); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+          break
+        fi
+        sleep 0.2
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    fi
+    rm -f "$file"
+  done
+}
+
+start_all() {
+  umask 077
+  load_secrets
 
   echo "=========================================================="
   echo " Starting Sysadmin AI Platform Backend (Zero-Docker Stack)"
   echo "=========================================================="
 
   # 1. Valkey (Fast memory & state store)
-  start_service "valkey" "${BIN_DIR}/valkey-server" "${RUN_DIR}/valkey.conf"
-
+  start_one valkey
   # 2. VictoriaLogs (Forensic audit logs database)
-  start_service "victorialogs" "${BIN_DIR}/victoria-logs-prod" \
-    "-storageDataPath=${DATA_DIR}/victorialogs" \
-    "-retentionPeriod=90d" \
-    "-httpListenAddr=127.0.0.1:9428"
-
+  start_one victorialogs
   # Replay audit events buffered while VictoriaLogs was unavailable.
-  start_service "audit_outbox" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/agent_tools/audit.py" "--worker"
-
+  start_one audit_outbox
   # 3. SeaweedFS (Local S3 object storage & filer)
-  start_service "seaweedfs" "${BIN_DIR}/weed" "server" \
-    "-dir=${DATA_DIR}/seaweedfs" \
-    "-ip=127.0.0.1" \
-    "-ip.bind=127.0.0.1" \
-    "-master.peers=none" \
-    "-s3" \
-    "-s3.port=8333" \
-    "-master.port=9333" \
-    "-filer.port=8888" \
-    "-volume.port=8085"
-
+  start_one seaweedfs
   # 4. Inference Engine (Local mock / upstream vLLM router)
-  start_service "inference" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/inference_engine/server.py" 8000
-
+  start_one inference
   # 5. Auth Gateway (Traefik ForwardAuth adapter)
-  start_service "auth_gateway" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/auth_gateway/server.py" 3081
-
+  start_one auth_gateway
   # 6. Agent Tools Platform (Sandboxed tools, approval gate & audit)
-  start_service "agent_tools" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/agent_tools/server.py" 3080
-
+  start_one agent_tools
   # 7. LiteLLM Proxy (Token quotas, rate limits, virtual keys)
-  start_service "litellm" "$VENV_LITELLM" \
-    "--config" "${CONFIG_DIR}/litellm/config.yaml" \
-    "--port" "4000" \
-    "--host" "127.0.0.1" \
-    "--num_workers" "2"
-
+  start_one litellm
   # 8. Traefik Reverse Proxy (TLS termination & routing)
-  start_service "traefik" "${BIN_DIR}/traefik" \
-    "--configFile=${CONFIG_DIR}/traefik/traefik.yml"
+  start_one traefik
 
   echo "=========================================================="
   echo " All services launched. Run './platform.sh status' to inspect."
@@ -177,8 +277,10 @@ start_all() {
 
 stop_all() {
   echo "Stopping all Sysadmin AI Platform services..."
-  # The harness gateway owns per-user dsh children; stop it before their backend.
+  # The harness gateway owns per-user dsh children; stop it before their backend
+  # and reap the instances it left running for re-adoption.
   stop_service "harness_gateway"
+  reap_harness_instances
   stop_service "traefik"
   stop_service "litellm"
   stop_service "agent_tools"
@@ -193,16 +295,16 @@ stop_all() {
 
 show_status() {
   echo "=== Sysadmin AI Platform Service Status ==="
-  status_service "traefik" "8080"
-  status_service "litellm" "4000"
-  status_service "agent_tools" "3080"
-  status_service "auth_gateway" "3081"
-  status_service "inference" "8000"
-  status_service "seaweedfs" "8333"
-  status_service "audit_outbox" "-"
-  status_service "victorialogs" "9428"
-  status_service "valkey" "6379"
-  status_service "harness_gateway" "3085"
+  status_one traefik
+  status_one litellm
+  status_one agent_tools
+  status_one auth_gateway
+  status_one inference
+  status_one seaweedfs
+  status_one audit_outbox
+  status_one victorialogs
+  status_one valkey
+  status_one harness_gateway
   echo "==========================================="
 }
 
@@ -210,7 +312,7 @@ show_status() {
 # It is opt-in rather than part of start_all because it needs the `dsh` CLI and
 # boots one harness process per logged-in sysadmin on demand.
 start_harness() {
-  local node_bin
+  local node_bin dsh_bin
   node_bin="$(command -v node || true)"
   if [ -z "$node_bin" ]; then
     echo "  [!] node is required to run the harness gateway" >&2
@@ -220,12 +322,70 @@ start_harness() {
     echo "  [!] harness gateway not found at ${HARNESS_DIR}/gateway/server.js" >&2
     return 1
   fi
-  if ! command -v "${DSH_BIN:-dsh}" >/dev/null 2>&1 && [ ! -x "${DSH_BIN:-dsh}" ]; then
-    echo "  [!] '${DSH_BIN:-dsh}' not found. Set DSH_BIN to the dsh launcher." >&2
+  dsh_bin="${DSH_BIN:-}"
+  if [ -z "$dsh_bin" ]; then
+    # Prefer the stable global install over an ephemeral npx cache.
+    dsh_bin="$(command -v dsh 2>/dev/null || true)"
+  fi
+  if [ -z "$dsh_bin" ] || { ! command -v "$dsh_bin" >/dev/null 2>&1 && [ ! -x "$dsh_bin" ]; }; then
+    echo "  [!] '${DSH_BIN:-dsh}' not found. Install @deepseek-ai/dsh globally or set DSH_BIN to the launcher." >&2
     return 1
   fi
+  export DSH_BIN="$dsh_bin"
   export SYSADMIN_BACKEND_ROOT="${ROOT_DIR}"
+  # The harness plugin and gateway talk to the agent platform on the port this
+  # host actually uses (3080 by default, SYSADMIN_AGENT_PORT when overridden).
+  export SYSADMIN_BACKEND_URL="${SYSADMIN_BACKEND_URL:-http://127.0.0.1:${AGENT_PORT}}"
   start_service "harness_gateway" "$node_bin" "${HARNESS_DIR}/gateway/server.js"
+}
+
+# Start, stop, restart or inspect one service.
+service_cmd() {
+  local name="${1:-}"
+  local action="${2:-status}"
+  case " ${SERVICE_NAMES} " in
+    *" ${name} "*) ;;
+    *)
+      echo "Unknown service: ${name:-<empty>}" >&2
+      echo "Known services: ${SERVICE_NAMES}" >&2
+      return 1
+      ;;
+  esac
+
+  case "$action" in
+    start)
+      if [ "$name" = "harness_gateway" ]; then
+        start_harness
+      else
+        load_secrets
+        start_one "$name"
+      fi
+      ;;
+    stop)
+      stop_service "$name"
+      if [ "$name" = "harness_gateway" ]; then
+        reap_harness_instances
+      fi
+      ;;
+    restart)
+      if [ "$name" = "harness_gateway" ]; then
+        stop_service "$name"
+        reap_harness_instances
+        start_harness
+      else
+        load_secrets
+        stop_service "$name"
+        start_one "$name"
+      fi
+      ;;
+    status)
+      status_one "$name"
+      ;;
+    *)
+      echo "Usage: $0 service <name> {start|stop|restart|status}" >&2
+      return 1
+      ;;
+  esac
 }
 
 show_logs() {
@@ -249,7 +409,7 @@ run_tests() {
     start_all
     auto_started=true
     sleep 4
-    for port in 6379 9428 8333 8000 3081 3080 4000 8080; do
+    for port in 6379 9428 8333 8000 3081 "$AGENT_PORT" 4000 8080; do
       for _ in $(seq 1 10); do
         if "$VENV_PYTHON" -c "import socket; s = socket.socket(); s.settimeout(0.5); exit(s.connect_ex(('127.0.0.1', $port)))" 2>/dev/null; then
           break
@@ -285,6 +445,9 @@ case "${1:-status}" in
   status)
     show_status
     ;;
+  service)
+    service_cmd "${2:-}" "${3:-status}"
+    ;;
   logs)
     show_logs "${2:-all}"
     ;;
@@ -305,9 +468,10 @@ case "${1:-status}" in
     ;;
   harness-stop)
     stop_service "harness_gateway"
+    reap_harness_instances
     ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|harness|harness-stop|dashboard|survey|chat|logs [service]|test}"
+    echo "Usage: $0 {start|stop|restart|status|service <name> {start|stop|restart|status}|harness|harness-stop|dashboard|survey|chat|logs [service]|test}"
     exit 1
     ;;
 esac
