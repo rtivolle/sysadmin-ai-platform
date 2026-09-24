@@ -1,0 +1,21 @@
+# Measured on four H200 GPUs; full official mixed FP8/FP4 checkpoint.
+# Set VLLM_CONFIG to this file. Register matching TP/context/memory values:
+# tensor_parallel_size=4, max_model_len=32768, gpu_memory_utilization=0.9.
+# Registry fields override YAML. Engram uses substantial pinned host RAM.
+# The deepseek_v41 tokenizer/parser literals below were validated against
+# vLLM 0.30.0 on the measured host; re-verify them for other vLLM versions.
+dtype: auto
+tensor-parallel-size: 4
+max-model-len: 32768
+gpu-memory-utilization: 0.9
+max-num-seqs: 4
+max-num-batched-tokens: 1024
+enforce-eager: true
+trust-remote-code: false
+tokenizer-mode: deepseek_v41
+reasoning-parser: deepseek_v41
+tool-call-parser: deepseek_v41
+enable-auto-tool-choice: true
+engram-config:
+  cpu_offload: true
+kv-cache-dtype: fp8

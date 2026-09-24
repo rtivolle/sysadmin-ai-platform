@@ -2,6 +2,62 @@
 
 Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q` from the repository root.
 
+## NVIDIA setup and native vLLM configuration (2026-09-24)
+
+- Added an Ubuntu NVIDIA PCI detection/driver installation helper with read-only
+  default and explicit `--apply`, matching driver utilities, optional CUDA
+  development toolkit, and TUI integration. Added native operator-owned vLLM
+  YAML, installer version selection/skip, and a post-install CUDA probe.
+- Session measurements: `make test` with bytecode/cache writes disabled and
+  local socket access: **663 passed, 2 skipped**, one httpx cookie deprecation
+  warning, 63.47s. Seven additional boundary tests were added after that run;
+  the final focused GPU setup/configuration suite: **20 passed**, 0.09s.
+- Required final tier 1 + tier 3 regression run (including the seven additional
+  tests): **449 passed, 2 skipped**, one httpx warning, 30.50s.
+  The two skips are optional ShellCheck checks (`shellcheck` is not installed),
+  confirmed with a focused `-rs` run; Bash syntax checks passed separately.
+- `bash -n install.sh`, installer help, driver preview, Python AST syntax, and
+  whitespace checks on this change passed. The read-only preview detected
+  Ubuntu 26.04.1 LTS and an NVIDIA PCI device; no package installation ran.
+- The initial full-suite attempt in the restricted sandbox failed collection
+  because socket creation was prohibited. An initial combined model-manager
+  focused run in that sandbox was interrupted after stalling; the successful
+  full-suite run included those tests outside that restriction.
+- Driver retrieval/installation, reboot/MOK enrollment, optional toolkit
+  installation, vLLM wheel installation/CUDA probe, and real managed GPU model
+  startup were **not measured** in this session. This is implementation/unit
+  evidence, not GPU-host or production qualification.
+- Repository-wide `git diff --check` also reports a pre-existing extra EOF
+  blank line in `docs/plans/MULTI_HOST_DEPLOYMENT.md`; left unchanged.
+
+## Installer Valkey fix (2026-09-24)
+
+- `install.sh` failed on hosts without Linuxbrew (`Neither valkey-server nor
+  Homebrew found`). Section 3.4 now resolves Valkey in this order: `PATH`
+  binary, Linuxbrew prefix, `brew install`, the official sha256-verified
+  prebuilt tarball from `download.valkey.io`
+  (`valkey-7.2.14-jammy-<arch>.tar.gz`, `valkey-server` + `valkey-cli`), then
+  `apt-get` (Ubuntu 24.04+/Debian 13, passwordless sudo) / `apk` (Alpine).
+  Fail-closed: if nothing resolves, it exits 1 with per-distro instructions.
+- Verified on this host (Azure, Ubuntu 24.04 base, no Homebrew PATH entry):
+  - download path: sha256 check passed, both binaries extracted to a scratch
+    `BIN_DIR`, `valkey-server` runs (7.2.14, jemalloc), temp files cleaned;
+  - apt fallback exercised with stubbed `curl`/`sudo`/`apt-get` (nothing real
+    installed) and the total-failure path exits 1 with guidance;
+  - the existing Linuxbrew-prefix branch still resolves first when present
+    (observed v9.1.2 on the dev host).
+- `bash -n install.sh` passes; shellcheck is not installed on this host, so
+  `test_shellcheck_when_available` skipped (2 skips).
+- `backend/tests/tier1_unit/test_egress_audit.py` +
+  `test_multihost_render.py`: **40 passed, 2 skipped**. The egress census runs
+  clean with the new `download.valkey.io` destination classified in
+  `backend/tests/qualification/egress_allowlist.json`, and `docs/sovereignty.md`
+  plus `docs/operations.md` now describe the new resolution order.
+- A full `./install.sh` end-to-end on this host was not run (it would
+  regenerate `backend/config/keys/` while other agents hold in-flight work);
+  the Valkey section was verified standalone instead. Not measured: `make
+  test-live` with the new binary.
+
 ## Code-inspection repair run (2026-09-24)
 
 - Initial `make test` on the inherited working tree: **457 passed, 2 failed,
@@ -161,8 +217,23 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
   without making health probes on request paths; reaping waits for the matching
   PID to exit before clearing state; start jobs install an atomic sentinel and
   model starts serialize during load.
-- Post-remediation focused and full test counts are pending in this session.
-  `make compile` and `git diff --check` will be repeated after remediation.
+- Oracle re-review identified two residual lifecycle gaps: delete could race the
+  start sentinel, and read-path reap failures cleared PID/port. Delete/register/
+  download now serialize under the model-operation lock and reject starting or
+  downloading jobs. Reap failures retain PID/port and become a visible error
+  that requires explicit stop/retry.
+- After both remediation passes: `backend/.venv/bin/python3 -m pytest
+  backend/tests/tier1_unit/test_model_manager.py
+  backend/tests/tier1_unit/test_inference_gateway.py -q`: **39 passed**.
+   Final `make test`: **509 passed, 21 skipped, 0 failed** (39.03 s; 530
+   collected). All backend services were stopped. `pytest -q -rs` on the same
+   stopped-service configuration attributed the 21 skips to seven live
+  `test_platform.py` checks, one Valkey admin quota case, two daily-token
+  Valkey cases, and eleven live auth/Traefik/Valkey challenger checks; these
+   checks remain unverified, not passed. `git diff --check` passed after
+   remediation. `make compile` remains blocked by an existing syntax error at
+   `backend/services/target_executor/main.py:501` (`return ... from exc`); that
+   unrelated file was not modified here.
 - This phase validates command construction, file/path confinement, injected
   process lifecycle, admin registration and fail-closed routing in tests only.
   It has **not** yet run a manager-mediated HF file download, launched llama.cpp
@@ -190,7 +261,7 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
 | Live local auth and quota suite | 19 passed | Services started together outside the restricted test sandbox and stopped afterward |
 | Live authenticated chat | HTTP 200 | Traefik → auth → agent → LiteLLM → simulated inference |
 | Source checks | Passed | Shell syntax and Python compilation |
-| Custom dsh harness integration (2026-09-24) | 56 node tests passed; 8/8 real-`dsh` checks; 37/37 live gateway checks | Profile composes with the `dsh-plugin-sysadmin` bundle, the plugin's load banner prints, the web surface binds and refuses an unauthenticated request, and the served index carries the Mila title/favicon; the JS command policy matches the Python gate action-for-action. The live gateway run covered two concurrent sysadmins on isolated instances (the verifier used 3210/3211 in the 3210–3260 scratch range; the running gateway serves the same users in the 3180–3280 range), launch handoff, sessions surviving a gateway SIGTERM+restart with instance re-adoption on the same port, Mila-branded login/admin pages, master-key admin login with backend verification, overview probes, an instance restart that reused the port, a real approval requested with a user key and decided in the console, audit query, `platform.sh service` restart, and session revocation. The gateway preserves the browser `Host` (rewriting it to the loopback instance port made the harness Origin fence answer 403 and kept the UI stuck behind login); per-instance trusted hosts carry the host's LAN addresses, and the verifier reuses one gateway port across its restart because the harness cookie is bound to the gateway authority. A real browser on `http://192.168.14.159:3085/` renders the signed-in user (`sysadmin-01`) in the sidebar, the Mila logo in the sidebar and hero brand seats, the tab pinned to *Mila — Sysadmin AI*, a files panel listing the user's workspace (`GET /api/sysadmin/surface`, paths confined to the per-user root), and no DeepSeek brand text, with zero console errors |
+| Custom dsh harness integration (2026-09-24, re-verified after the admin fall-through fix) | 57 node tests passed; 8/8 real-`dsh` checks; 37/37 live gateway checks | Profile composes with the `dsh-plugin-sysadmin` bundle, the plugin's load banner prints, the web surface binds and refuses an unauthenticated request, and the served index carries the Mila title/favicon; the JS command policy matches the Python gate action-for-action. The live gateway run covered two concurrent sysadmins on isolated instances (the verifier used 3210/3211 in the 3210–3260 scratch range; the running gateway serves the same users in the 3180–3280 range), launch handoff, sessions surviving a gateway SIGTERM+restart with instance re-adoption on the same port, Mila-branded login/admin pages, master-key admin login with backend verification, overview probes, an instance restart that reused the port, a real approval requested with a user key and decided in the console, audit query, `platform.sh service` restart, and session revocation. The gateway preserves the browser `Host` (rewriting it to the loopback instance port made the harness Origin fence answer 403 and kept the UI stuck behind login); per-instance trusted hosts carry the host's LAN addresses, and the verifier reuses one gateway port across its restart because the harness cookie is bound to the gateway authority. A real browser on `http://192.168.14.159:3085/` renders the signed-in user (`sysadmin-01`) in the sidebar, the Mila logo in the sidebar and hero brand seats, the tab pinned to *Mila — Sysadmin AI*, a files panel listing the user's workspace (`GET /api/sysadmin/surface`, paths confined to the per-user root), and no DeepSeek brand text, with zero console errors. A live gateway crash was fixed on 2026-09-24: the admin console's page and its session probe were served but reported unhandled for browsers holding both a user session and admin access, so the request fell through to the harness proxy and the double response killed the process (`ERR_HTTP_HEADERS_SENT`); admin handlers now report handled, `proxyHttp` drops an upstream response that would rewrite a committed one, and the 57th Node test pins the fall-through. All three counts were re-measured after the fix. |
 
 The 23 skips in the table's historical row reflect a restricted workspace without delegated writable cgroups v2 or Bubblewrap namespaces, plus services intentionally stopped during a unit run; the five socket failures there were environment restrictions. On the current host those prerequisites exist, so the sandbox suite executes and passes, and the live stack run skips nothing. Sandbox tests still skip only when host prerequisites are missing, and a separate runner check verifies that commands fail closed instead of running without cgroup limits. A kernel-backed stress run on 2026-09-24 (`backend/tests/qualification/sandbox_stress.sh`, via `make stress-sandbox`) proves the ceilings on the runner's `systemd-run` leg: a 6 GiB allocation is OOM-killed at the 4 GiB ceiling, 400 spawn attempts are bounded to the 128-task ceiling with fork failures, four CPU spinners are throttled to a 2-CPU ratio, a 60 s sleep is killed at the 15 s deadline, a sandboxed client cannot reach a live listener on the host loopback, and the filesystem view is confined to the workspace. That run caught a real gap first: `memory.max` alone did not bound total memory — RSS pinned at 4 GiB while swap usage climbed without bound and the 6 GiB allocation survived. The runner now also enforces `memory.swap.max=0` (`MemorySwapMax=0` on the systemd leg; read-back-verified on the raw leg, fail-closed if it cannot be installed), and the OOM kill at the ceiling was re-measured after the fix. The raw cgroup-delegation leg could not be measured in the qualifying session (no delegated writable subtree in that cgroup); it was verified to fail closed instead — abort 126 before executing the command. Re-run `make stress-sandbox` under the platform account's delegated subtree on the production host to qualify the raw leg.
 
@@ -246,3 +317,97 @@ For live tests, start the services in the same host session, wait for LiteLLM on
 The items below are tracked as a prioritized, one-agent-per-item program in [../plans/PRODUCTION_READINESS.md](../plans/PRODUCTION_READINESS.md).
 
 This is not a production acceptance certificate. The scoped target adapter and shared approval store are implemented, but a least-privilege privileged boundary, multi-worker Valkey integration run, and clean staging target deployment remain to be qualified. Lease ownership and renewal, plus atomic daily token reservations and settlement, were verified on 2026-09-24: the release path no longer strands a lease when the shared store is momentarily unusable, a cancelled or disconnected request reclaims its lease during cleanup, and the reservation lifecycle is covered by process-local and live-Valkey tests. The inference service is simulated unless an upstream vLLM endpoint is configured; NVIDIA Dynamo is not implemented here, and the DeepSeek Harness integration lives in `packages/harness-integration/` outside the `platform.sh` stack (started with `./platform.sh harness`, stopped with `./platform.sh harness-stop`). That integration's multi-user path is now verified end-to-end: two concurrent sysadmins against the running auth gateway, isolated harness processes, a real approval requested with a user key and decided in the Mila-branded admin console, per-user model traffic routed to LiteLLM, and browser sessions plus instances surviving a gateway restart (45 node tests, 8/8 real-`dsh` checks, 37/37 live gateway checks on 2026-09-24). The live harness run left Traefik stopped and used the agent platform on port 3090 as described in the host note, so the Traefik-routed platform sections skipped rather than passing. A real owner-scored 30-task evaluation remains to be done, and the event-by-event audit census is now published in [AUDIT_CENSUS.md](AUDIT_CENSUS.md) with five named paths still unaudited. The kernel-backed sandbox stress run is done on the systemd-run leg (above); only the raw cgroup-delegation leg still needs a run on a host with a delegated writable subtree. The clean-staging restore drill is done at the file level with measured timings (above); what remains open is post-restore service bring-up from restored state and a production-sized data set, so the end-to-end RTO under four hours is supported by extrapolation, not fully measured.
+
+## Vast.ai dual enterprise A100 installation smoke test (2026-09-24)
+
+- Installed the current worktree installer on temporary Vast.ai instance
+  `52486654`: Ubuntu 24.04.5, **2 × NVIDIA A100-PCIE-40GB**, driver
+  `595.71.05`, 100 GB rented disk. Quoted compute plus disk: **$2.616963/hour**.
+- Uploaded only ten installer/lifecycle/provisioning scripts and configuration
+  templates (15,498-byte archive), excluding local credentials, application
+  Python/JS source, runtime data, models and environments. Provisioning helpers
+  came from their versioned Git objects; fresh credentials stayed on the host.
+- Installed host prerequisites (including `python3-venv`, Bubblewrap, curl,
+  sudo and libnuma1), then ran `bash ./install.sh` with the default `all` role.
+  Installer **exit 0 in 99 seconds**. Traefik 3.7.13, SeaweedFS 4.47,
+  VictoriaLogs and checksum-verified Valkey 7.2.14 were obtained successfully.
+- Installed **vLLM 0.30.0**, **PyTorch 2.13.0+cu132 / CUDA 13.2**,
+  FastAPI 0.141.1 and LiteLLM 1.102.1. The installer's CUDA probe passed;
+  separate allocation/copy assertions passed on **both GPUs**. `vllm --version`
+  returned 0.30.0 with exit 0. No model download or inference was performed.
+- Instance created at 21:28:34 UTC, remote test finished at 21:32:42 UTC,
+  destruction requested immediately afterwards. An independent
+  `vastai show instances` query confirmed **zero remaining instances**.
+  The billing API subsequently reported **$0.126** for this instance
+  ($0.122 GPU, $0.004 disk); this is the currently reported charge, not a
+  final invoice or assurance that delayed bandwidth accounting is complete.
+- Scope limit: this was an explicitly authorized container-hosted installation
+  test, not bare-metal/no-container deployment or full-stack qualification.
+  cgroups v2 was mounted **read-only**; sandbox execution was not qualified.
+  Host-driver installation, multi-GPU inference/NCCL, service startup,
+  model-manager lifecycle, runtime integration and production readiness were
+  **not measured**. No application code was changed for this test.
+- CLI orchestration issues: SSH attachment `--raw` printed a Python-style dict;
+  destruction required `--yes` and produced empty `--raw` output. The controller
+  incorrectly reported cleanup failure, but independent instance listing
+  confirmed teardown. Billing lookup required both start and end dates to
+  avoid the CLI's default-end-date TypeError.
+- Local raw log: `/tmp/vast-install-test-20260924/install.log`; upload manifest:
+  `/tmp/vast-install-test-20260924/installer-only-manifest.json` (temporary
+  local evidence; not a portable repository artifact).
+- Local repository-required regression after recording this evidence: `make test`
+  **670 passed, 2 skipped, 1 warning in 58.23s**. The initial restricted-sandbox
+  attempt failed collection because socket creation was prohibited; the completed
+  run used normal host socket access. This does not expand the remote test scope.
+
+## Vast.ai 4×H200 DeepSeek deployment → durable fixes (2026-09-24)
+
+- Temporary Vast.ai instance `52490639` (offer 20654525): Ubuntu 24.04
+  container, **4 × NVIDIA H200**, driver `570.148.08`, ~1 TiB host RAM, NVLink
+  fabric, **575 084 MiB** advertised VRAM, **$18.599/hour**. The instance is
+  operator-owned and **left running**; the admin console was exposed at
+  `https://208.64.254.182:30321/admin` behind a temporary self-signed
+  certificate. Bubblewrap cannot run inside the provider container, so
+  sandboxed execution remains **unqualified** on this host.
+- The repository survey detected all four GPUs. The official
+  `deepseek-ai/DeepSeek-V4.1-Flash` checkpoint (48 shards) was downloaded
+  through the model manager and served with tensor parallel 4
+  (`system_fingerprint: vllm-0.30.0-tp4`). Real inference verified: direct
+  `2+2` → `4` (~0.30 s), an authenticated HTTPS chat completion answered a
+  French SSH question (43 completion tokens), and after the streaming fix a
+  ~9000-token prompt streamed to completion with usage reported.
+  `max-model-len` 32768 was the measured serving setting.
+- This remote test is the first manager-mediated HuggingFace download and real
+  vLLM start through the platform path; the earlier "not measured" notes for
+  the model manager above refer to the development host, not to this rental.
+- Four field defects were converted into repository fixes in this worktree:
+  1. Streamed proxy requests replayed a consumed httpx stream, so DSH turns
+     died with `TransferEncodingError`. The proxy now keeps client and
+     response alive until the downstream stream closes and propagates upstream
+     error statuses; regression tests in
+     `backend/tests/tier1_unit/test_inference_streaming.py`.
+  2. The installer picked torch from the host driver's CUDA level, mixing
+     CUDA 12 torch with the CUDA 13 vLLM wheel (ABI mismatch). The vLLM wheel
+     now resolves torch, and `install.sh` fails closed on the new preflight
+     `backend/scripts/verify_vllm_runtime.py` (imports + per-GPU allocation;
+     `--jit` adds nvcc/cuRAND/ninja checks).
+  3. DeepSeek JIT kernels needed nvcc, cuRAND headers and ninja, and the CUDA
+     torchaudio wheel rejected torch CUDA 13.2 (CPU wheel used). Operator
+     recipe: [../runbooks/vast-deepseek.md](../runbooks/vast-deepseek.md).
+  4. The DSH profile hardcoded the two simulator model IDs and an 8192-token
+     context, so the deployed model never appeared and the DSH system prompt
+     overflowed. The profile now reads `SYSADMIN_DEFAULT_MODEL`,
+     `SYSADMIN_MODEL_DISPLAY_NAME`, `SYSADMIN_MODEL_CONTEXT_WINDOW` (simulator
+     fallback clearly labelled); example config
+     `backend/config/vllm/deepseek-v41-h200.example.yaml`.
+- Local regression (development host, full stack up): `make test`
+  **680 passed, 2 skipped** (one pre-existing httpx cookies deprecation
+  warning) in 60.92 s; harness **57/57 node tests**. `make harness-verify`
+  was not run — no local `dsh` binary. The count includes this lane's ten new
+  tier-1 tests (5 streaming, 5 preflight) plus other lanes' in-flight
+  additions.
+- Scope limits: container-hosted test, not bare metal; sandbox execution,
+  multi-user runtime against the real model, NCCL stress and long-run
+  stability are **not measured**. No final invoice: the instance remains
+  running at ~$18.60/hour under operator control. Temporary local evidence:
+  `/tmp/vast-deepseek-deploy-20260924/`.

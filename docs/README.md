@@ -35,6 +35,7 @@ requirement specifications:
 | [operations.md](operations.md) | Install, start, stop, CLI usage, logs, dashboards and troubleshooting. |
 | [configuration.md](configuration.md) | Configuration files, environment variables, ports and paths. |
 | [model-management.md](model-management.md) | Register, download and locally serve HuggingFace models through vLLM. |
+| [runbooks/vast-deepseek.md](runbooks/vast-deepseek.md) | Operator recipe for a remote multi-GPU deployment: the measured 4×H200 DeepSeek setup, CUDA/JIT prerequisites, DSH wiring and acceptance tests. |
 | [backup-restore.md](backup-restore.md) | Backup, clean-staging restore and the disaster-recovery drill. |
 | [testing.md](testing.md) | Test tiers, how to run them, recorded results and environment limits. |
 | [development.md](development.md) | Repository layout, conventions and extension points. |

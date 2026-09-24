@@ -18,19 +18,16 @@
         apiKeyEnv: SYSADMIN_LITELLM_KEY
         api: openai-completions
         baseURL: !!js process.env.SYSADMIN_LITELLM_URL ?? 'http://127.0.0.1:4000/v1'
-        models:
-          - id: heavy-model
-            name: Heavy Model
-            contextWindow: 32768
-          - id: fast-model
-            name: Fast Model
-            contextWindow: 32768
+        # Explicit deployment model metadata; no false claim of Hub/API discovery.
+        # Both expressions below gate on the same trimmed, non-empty model id so
+        # the menu and the default session model can never disagree.
+        models: !!js "process.env.SYSADMIN_DEFAULT_MODEL?.trim() ? [{ id: process.env.SYSADMIN_DEFAULT_MODEL.trim(), name: process.env.SYSADMIN_MODEL_DISPLAY_NAME?.trim() || process.env.SYSADMIN_DEFAULT_MODEL.trim(), contextWindow: Number(process.env.SYSADMIN_MODEL_CONTEXT_WINDOW) || 8192 }] : [{ id: 'heavy-model', name: 'Heavy Model (simulator)', contextWindow: 32768 }, { id: 'fast-model', name: 'Fast Model (simulator)', contextWindow: 32768 }]"
 
 # Every new session starts on the backend-routed alias.
 - id: agent-default-model
   config:
     provider: litellm
-    model: !!js process.env.SYSADMIN_DEFAULT_MODEL ?? 'heavy-model'
+    model: !!js process.env.SYSADMIN_DEFAULT_MODEL?.trim() || 'heavy-model'
 
 # One instance per user, so the bind host/port are per-process environment.
 - id: webserver
