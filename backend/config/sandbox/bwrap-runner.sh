@@ -30,9 +30,13 @@ fi
 
 # If systemd-run --user is available and functional, use it directly to enforce
 # exact cgroup resource ceilings (4 GiB memory, 128 pids, 200% CPU quota).
+# MemorySwapMax=0 is required: memory.max alone lets the kernel swap pages out
+# at the ceiling instead of OOM-killing, so total memory (RSS + swap) would
+# exceed the 4 GiB envelope on any swap-enabled host.
 if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope -q true 2>/dev/null; then
   exec systemd-run --user --scope -q \
     -p MemoryMax=4G \
+    -p MemorySwapMax=0 \
     -p TasksMax=128 \
     -p CPUQuota=200% \
     "$TIMEOUT_BIN" --kill-after=5s 15s "$BWRAP_BIN" \
@@ -95,6 +99,20 @@ if ! { echo 4294967296 > "$CGROUP/memory.max" 2>/dev/null &&
   echo "Error: no delegated cgroup available for sandbox" >&2
   echo "Error: cannot enforce sandbox cgroup limits" >&2
   exit 126
+fi
+
+# memory.max alone does not bound total memory on hosts with swap: at the
+# ceiling the kernel swaps anonymous pages out instead of OOM-killing, so the
+# process grows past the 4 GiB envelope (measured: RSS pinned at 4 GiB while
+# swap usage climbed without bound). Forbid swap so the ceiling is a real
+# total-memory bound. A kernel without swap accounting has no memory.swap.max
+# file and nothing to enforce.
+if [ -f "$CGROUP/memory.swap.max" ]; then
+  if ! echo 0 > "$CGROUP/memory.swap.max" 2>/dev/null ||
+     [ "$(cat "$CGROUP/memory.swap.max" 2>/dev/null)" != "0" ]; then
+    echo "Error: cannot enforce sandbox swap limit" >&2
+    exit 126
+  fi
 fi
 
 # Join the limited cgroup before executing Bubblewrap; all its descendants inherit it.

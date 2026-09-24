@@ -28,6 +28,9 @@ def test_child_is_in_limited_cgroup_when_host_delegates(tmp_path):
 group=$(sed -n 's/^0:://p' /proc/self/cgroup)
 base="/sys/fs/cgroup${group}"
 cat "$base/memory.max" "$base/pids.max" "$base/cpu.max"
+# memory.max alone does not bound total memory on swap-enabled hosts; the
+# runner must also forbid swap. Kernels without swap accounting have no file.
+if [ -f "$base/memory.swap.max" ]; then cat "$base/memory.swap.max"; fi
 """)
     probe.chmod(0o700)
     runner = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../config/sandbox/bwrap-runner.sh"))
@@ -37,7 +40,14 @@ cat "$base/memory.max" "$base/pids.max" "$base/cpu.max"
     if result.returncode == 126 and "no delegated cgroup" in result.stderr:
         pytest.skip("Host has not delegated a writable cgroups v2 subtree")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["4294967296", "128", "200000 100000"]
+    lines = result.stdout.splitlines()
+    assert lines[:3] == ["4294967296", "128", "200000 100000"]
+    # With swap accounting present the runner must cap swap at zero so the
+    # 4 GiB ceiling bounds total memory, not just RSS.
+    if len(lines) == 4:
+        assert lines[3] == "0"
+    else:
+        assert len(lines) == 3
 
 def test_adversarial_fork_bomb_blocked_at_interceptor():
     """Verify classic fork-bomb ':(){ :|:& };:' is unconditionally blocked by safety filter."""
