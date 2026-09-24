@@ -232,8 +232,9 @@ async def test_quotamanager_high_concurrency_saturation_stress():
 async def test_valkey_redis_concurrency_burst_and_slot_recovery():
     """
     Live Valkey Redis stress test:
-    Launches an ephemeral Valkey server instance to verify real Redis atomic INCR/DECR,
-    100 concurrent requests across 10 users, key expiration, and zero slot leaks.
+    Launches an ephemeral Valkey server instance to verify real Redis atomic
+    lease-set admission, 100 concurrent requests across 10 users, key
+    expiration, and zero slot leaks.
     """
     valkey_bin = BACKEND_DIR / "bin" / "valkey-server"
     if not valkey_bin.is_file() or not os.access(valkey_bin, os.X_OK):
@@ -288,18 +289,21 @@ async def test_valkey_redis_concurrency_burst_and_slot_recovery():
         assert len(valkey_leases) == 2, f"Expected 2 admitted leases in Valkey, got {len(valkey_leases)}"
         assert valkey_rejections == 28, f"Expected 28 rejections in Valkey, got {valkey_rejections}"
 
-        # Check raw Redis key value
-        raw_val = int(qm.redis.get(f"inflight:{test_user}") or 0)
-        assert raw_val == 2, f"Valkey in-flight key should be exactly 2, got {raw_val}"
+        # Check the raw Redis lease set: one sorted-set member per live lease
+        user_key = f"quota:leases:user:{test_user}"
+        raw_val = int(qm.redis.zcard(user_key))
+        assert raw_val == 2, f"Valkey lease set should hold exactly 2 in-flight leases, got {raw_val}"
+        assert int(qm.redis.zcard("quota:leases:cluster")) >= 2
 
         # Release both slots
         qm.release_concurrency_slot(test_user)
         qm.release_concurrency_slot(test_user)
 
-        # In-flight key should be deleted or <= 0
-        assert qm.redis.get(f"inflight:{test_user}") is None
+        # In-flight lease set should be empty again
+        assert int(qm.redis.zcard(user_key)) == 0
 
         # 2. Multi-User Valkey Burst: 10 users * 10 requests = 100 concurrent operations
+        cluster_before = int(qm.redis.zcard("quota:leases:cluster"))
         vusers = [f"vuser-{i:02d}-{uuid.uuid4().hex[:4]}" for i in range(10)]
         user_acquired = {u: 0 for u in vusers}
         user_rejected = {u: 0 for u in vusers}
@@ -327,7 +331,10 @@ async def test_valkey_redis_concurrency_burst_and_slot_recovery():
             # Release both slots
             qm.release_concurrency_slot(u)
             qm.release_concurrency_slot(u)
-            assert qm.redis.get(f"inflight:{u}") is None
+            assert int(qm.redis.zcard(f"quota:leases:user:{u}")) == 0
+
+        # No lease may survive the burst in the shared cluster index either.
+        assert int(qm.redis.zcard("quota:leases:cluster")) == cluster_before
 
     finally:
         try:

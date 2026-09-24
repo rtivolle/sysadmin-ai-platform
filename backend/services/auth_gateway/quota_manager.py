@@ -13,11 +13,18 @@ import time
 import datetime
 import json
 import uuid
+import logging
 import threading
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, Dict, Any
 import redis
 
+logger = logging.getLogger("auth_gateway.quota_manager")
+
+# The sorted sets below are the single source of truth for live leases. The
+# `inflight:<user>` integer keys are a compatibility mirror for dashboards that
+# predate leases; they are written inside the same atomic script so they cannot
+# diverge from the lease sets on acquire or release.
 LUA_ACQUIRE_LEASE = """
 local now = tonumber(ARGV[1])
 local expires_at = tonumber(ARGV[2])
@@ -40,6 +47,11 @@ redis.call('ZADD', KEYS[1], expires_at, lease_id)
 redis.call('ZADD', KEYS[2], expires_at, lease_id)
 redis.call('EXPIRE', KEYS[1], ttl * 2)
 redis.call('EXPIRE', KEYS[2], ttl * 2)
+local _, _, uid = string.find(KEYS[2], "quota:leases:user:(.+)")
+if uid then
+  redis.call('SET', 'inflight:' .. uid, user_count + 1)
+  redis.call('EXPIRE', 'inflight:' .. uid, ttl * 2)
+end
 return {1, user_count + 1, cluster_count + 1}
 """
 
@@ -47,6 +59,15 @@ LUA_RELEASE_LEASE = """
 local lease_id = ARGV[1]
 local user_count = redis.call('ZREM', KEYS[2], lease_id)
 local cluster_count = redis.call('ZREM', KEYS[1], lease_id)
+local _, _, uid = string.find(KEYS[2], "quota:leases:user:(.+)")
+if uid then
+  local rem = redis.call('ZCARD', KEYS[2])
+  if rem > 0 then
+    redis.call('SET', 'inflight:' .. uid, rem)
+  else
+    redis.call('DEL', 'inflight:' .. uid)
+  end
+end
 return {user_count, cluster_count}
 """
 
@@ -138,6 +159,7 @@ class QuotaManager:
         self._redis: Optional[redis.Redis] = redis_client
         self._custom_client = redis_client is not None
         self._local_lease_lock = threading.RLock()
+        self._redis_lock = threading.Lock()
         self._local_leases: Dict[str, Tuple[str, float]] = {}
         if enforce_cluster_limits is not None:
             self.enforce_cluster_limits = enforce_cluster_limits
@@ -146,13 +168,28 @@ class QuotaManager:
 
     @property
     def redis(self) -> Optional[redis.Redis]:
-        if self._redis is None and not getattr(self, "_custom_client", False):
+        """Return a verified shared client, or None when the shared store is unusable.
+
+        The client is only published after a successful PING. Publishing it first
+        let a concurrent caller borrow an unauthenticated client and take a
+        shared-store code path whose failure was silently swallowed, which lost
+        in-flight leases (see release_concurrency_slot). Connection attempts are
+        serialized so a store outage does not fan out into a connect storm.
+        """
+        if self._custom_client:
+            return self._redis
+        if self._redis is not None:
+            return self._redis
+        with self._redis_lock:
+            if self._redis is not None:
+                return self._redis
             try:
-                self._redis = redis.Redis.from_url(self.valkey_url, decode_responses=True, socket_timeout=2.0)
-                self._redis.ping()
+                client = redis.Redis.from_url(self.valkey_url, decode_responses=True, socket_timeout=2.0)
+                client.ping()
             except Exception:
-                self._redis = None
-        return self._redis
+                return None
+            self._redis = client
+            return self._redis
 
     # --- P1 Elevation ---
     def is_p1_elevated(self, user_id: str) -> bool:
@@ -180,7 +217,7 @@ class QuotaManager:
         r = self.redis
         if r:
             try:
-                r.setex(f"p1_elevation:{user_id}", duration_seconds, str(payload))
+                r.set(f"p1_elevation:{user_id}", str(payload), ex=duration_seconds)
             except Exception:
                 pass
         try:
@@ -233,11 +270,36 @@ class QuotaManager:
         return None
 
     # --- Concurrency Management (2 In-Flight Limit, 10 Cluster Ceiling, 2 Reserved P1 Slots) ---
+    def _acquire_local_lease(
+        self, user_id: str, limit: int, cluster_limit: int, lease_id: str, now: float, expires_at: float
+    ) -> str:
+        """Process-local admission used when no shared store is configured or reachable."""
+        with self._local_lease_lock:
+            for stale_id, (_, expiry) in list(self._local_leases.items()):
+                if expiry <= now:
+                    self._remove_local_lease(stale_id)
+            current = self._local_inflight.get(user_id, 0) if hasattr(self, "_local_inflight") else 0
+            if current >= limit:
+                raise QuotaExceededException("concurrency", f"Concurrency ceiling exceeded ({current}/{limit} in-flight calls active).", current, limit)
+            cluster_count = getattr(self, "_local_cluster_total", 0)
+            if self.enforce_cluster_limits and cluster_count >= cluster_limit:
+                raise QuotaExceededException("concurrency", f"Cluster concurrency ceiling exceeded ({cluster_count}/{cluster_limit} slots active).", cluster_count, cluster_limit)
+            if not hasattr(self, "_local_inflight"):
+                self._local_inflight = {}
+            self._local_inflight[user_id] = current + 1
+            if self.enforce_cluster_limits:
+                self._local_cluster_total = cluster_count + 1
+            self._local_leases[lease_id] = (user_id, expires_at)
+        return lease_id
+
     def acquire_concurrency_slot(self, user_id: str, timeout_seconds: int = 120) -> str:
         """
         Atomically acquires an in-flight slot.
         Returns a slot lease token string.
         Enforces user in-flight limit (2 for standard, 6 for P1) and cluster capacity (8 for standard, 10 for P1).
+        Fails closed when a shared store has been configured (VALKEY_URL or an
+        injected client); an unconfigured deployment degrades to process-local
+        lease accounting rather than refusing every request.
         """
         is_p1 = self.is_p1_elevated(user_id)
         limit = 6 if is_p1 else 2
@@ -246,49 +308,34 @@ class QuotaManager:
         now = time.time()
         expires_at = now + timeout_seconds
         r = self.redis
-        if not r:
-            if self.require_shared:
-                raise ConnectionError("Shared quota state unavailable")
-            with self._local_lease_lock:
-                for stale_id, (_, expiry) in list(self._local_leases.items()):
-                    if expiry <= now:
-                        self._remove_local_lease(stale_id)
-                current = self._local_inflight.get(user_id, 0) if hasattr(self, "_local_inflight") else 0
-                if current >= limit:
-                    raise QuotaExceededException("concurrency", f"Concurrency ceiling exceeded ({current}/{limit} in-flight calls active).", current, limit)
-                cluster_count = getattr(self, "_local_cluster_total", 0)
-                if self.enforce_cluster_limits and cluster_count >= cluster_limit:
-                    raise QuotaExceededException("concurrency", f"Cluster concurrency ceiling exceeded ({cluster_count}/{cluster_limit} slots active).", cluster_count, cluster_limit)
-                if not hasattr(self, "_local_inflight"):
-                    self._local_inflight = {}
-                self._local_inflight[user_id] = current + 1
-                if self.enforce_cluster_limits:
-                    self._local_cluster_total = cluster_count + 1
-                self._local_leases[lease_id] = (user_id, expires_at)
-            return lease_id
-
-        try:
-            global_key = "quota:leases:cluster"
-            user_key = f"quota:leases:user:{user_id}"
-            result = r.eval(
-                LUA_ACQUIRE_LEASE, 2, global_key, user_key,
-                now, expires_at, limit, 1 if self.enforce_cluster_limits else 0,
-                cluster_limit, timeout_seconds, lease_id,
-            )
-            admitted, current, reason = int(result[0]), int(result[1]), str(result[2])
-            if not admitted:
-                if reason == "cluster_limit":
-                    raise QuotaExceededException(
-                        "concurrency", f"Cluster concurrency ceiling exceeded ({current}/{cluster_limit} slots active).", current, cluster_limit
-                    )
-                raise QuotaExceededException(
-                    "concurrency", f"Concurrency ceiling exceeded ({current}/{limit} in-flight calls active).", current, limit
+        if r:
+            try:
+                global_key = "quota:leases:cluster"
+                user_key = f"quota:leases:user:{user_id}"
+                result = r.eval(
+                    LUA_ACQUIRE_LEASE, 2, global_key, user_key,
+                    now, expires_at, limit, 1 if self.enforce_cluster_limits else 0,
+                    cluster_limit, timeout_seconds, lease_id,
                 )
-            return lease_id
-        except QuotaExceededException:
-            raise
-        except Exception as exc:
-            raise ConnectionError("Shared quota state unavailable") from exc
+                admitted, current, reason = int(result[0]), int(result[1]), str(result[2])
+                if not admitted:
+                    if reason == "cluster_limit":
+                        raise QuotaExceededException(
+                            "concurrency", f"Cluster concurrency ceiling exceeded ({current}/{cluster_limit} slots active).", current, cluster_limit
+                        )
+                    raise QuotaExceededException(
+                        "concurrency", f"Concurrency ceiling exceeded ({current}/{limit} in-flight calls active).", current, limit
+                    )
+                return lease_id
+            except QuotaExceededException:
+                raise
+            except Exception as exc:
+                if self.require_shared:
+                    raise ConnectionError("Shared quota state unavailable") from exc
+                logger.warning("Shared quota acquisition failed; using local lease accounting: %s", exc)
+        elif self.require_shared:
+            raise ConnectionError("Shared quota state unavailable")
+        return self._acquire_local_lease(user_id, limit, cluster_limit, lease_id, now, expires_at)
 
     def _remove_local_lease(self, lease_id: str) -> bool:
         record = self._local_leases.pop(lease_id, None)
@@ -304,37 +351,60 @@ class QuotaManager:
             self._local_cluster_total -= 1
         return True
 
+    def _release_local_lease(self, lease_or_user_id: str) -> bool:
+        with self._local_lease_lock:
+            if lease_or_user_id.startswith("lease:"):
+                return self._remove_local_lease(lease_or_user_id)
+            if hasattr(self, "_local_inflight"):
+                candidates = [token for token, (owner, _) in self._local_leases.items() if owner == lease_or_user_id]
+                if candidates:
+                    return self._remove_local_lease(candidates[0])
+        return False
+
     def release_concurrency_slot(self, lease_or_user_id: str):
-        """Release exactly one lease; user IDs remain accepted for older callers."""
+        """Release exactly one lease; user IDs remain accepted for older callers.
+
+        A lease must be reclaimed even when the shared store is momentarily
+        unusable, otherwise the slot leaks until its TTL expires and the user
+        receives spurious 429s. Shared and local bookkeeping are both
+        reconciled; each is a no-op for leases it does not own.
+        """
         r = self.redis
         if r:
             try:
                 if lease_or_user_id.startswith("lease:"):
-                    _, user_id, lease_id = lease_or_user_id.split(":", 2)
+                    _, user_id, _ = lease_or_user_id.split(":", 2)
                     member = lease_or_user_id
                 else:
                     user_id = lease_or_user_id
                     user_key = f"quota:leases:user:{user_id}"
                     candidates = r.zrange(user_key, 0, 0)
-                    if not candidates:
-                        return
-                    member = candidates[0]
-                r.eval(
-                    LUA_RELEASE_LEASE, 2, "quota:leases:cluster", f"quota:leases:user:{user_id}", member
-                )
+                    member = candidates[0] if candidates else None
+                if member:
+                    r.eval(
+                        LUA_RELEASE_LEASE, 2, "quota:leases:cluster", f"quota:leases:user:{user_id}", member
+                    )
             except Exception as exc:
                 if self.require_shared:
                     raise ConnectionError("Shared quota state unavailable") from exc
-        else:
-            if self.require_shared:
-                raise ConnectionError("Shared quota state unavailable")
-            with self._local_lease_lock:
-                if lease_or_user_id.startswith("lease:"):
-                    self._remove_local_lease(lease_or_user_id)
-                elif hasattr(self, "_local_inflight"):
-                    candidates = [token for token, (owner, _) in self._local_leases.items() if owner == lease_or_user_id]
-                    if candidates:
-                        self._remove_local_lease(candidates[0])
+                logger.warning("Shared quota release failed for %s: %s", lease_or_user_id, exc)
+        elif self.require_shared:
+            raise ConnectionError("Shared quota state unavailable")
+        self._release_local_lease(lease_or_user_id)
+
+    def _renew_local_lease(self, lease_id: str, user_id: str, now: float, expires_at: float) -> bool:
+        with self._local_lease_lock:
+            current = self._local_leases.get(lease_id)
+            if not current or current[1] <= now:
+                self._remove_local_lease(lease_id)
+                if current is None and not self.require_shared:
+                    # A shared lease whose store is unreachable in a deployment
+                    # that does not require one: ownership cannot be proven, so
+                    # keep the in-flight request alive rather than cancelling it.
+                    return True
+                return False
+            self._local_leases[lease_id] = (user_id, expires_at)
+            return True
 
     def renew_concurrency_slot(self, lease_id: str, timeout_seconds: int = 120) -> bool:
         """Extend a live lease while its request is still running."""
@@ -344,23 +414,19 @@ class QuotaManager:
             raise ValueError("Invalid quota lease")
         _, user_id, _ = lease_id.split(":", 2)
         r = self.redis
-        if not r:
-            if self.require_shared:
-                raise ConnectionError("Shared quota state unavailable")
-            with self._local_lease_lock:
-                current = self._local_leases.get(lease_id)
-                if not current or current[1] <= now:
-                    self._remove_local_lease(lease_id)
-                    return False
-                self._local_leases[lease_id] = (user_id, expires_at)
-                return True
-        try:
-            return bool(r.eval(
-                LUA_RENEW_LEASE, 2, "quota:leases:cluster", f"quota:leases:user:{user_id}",
-                lease_id, expires_at, timeout_seconds,
-            ))
-        except Exception as exc:
-            raise ConnectionError("Shared quota state unavailable") from exc
+        if r:
+            try:
+                return bool(r.eval(
+                    LUA_RENEW_LEASE, 2, "quota:leases:cluster", f"quota:leases:user:{user_id}",
+                    lease_id, expires_at, timeout_seconds,
+                ))
+            except Exception as exc:
+                if self.require_shared:
+                    raise ConnectionError("Shared quota state unavailable") from exc
+                logger.warning("Shared quota renewal failed for %s: %s", lease_id, exc)
+        elif self.require_shared:
+            raise ConnectionError("Shared quota state unavailable")
+        return self._renew_local_lease(lease_id, user_id, now, expires_at)
 
     # --- Rate Limiting (60 RPM) ---
     def check_and_record_rpm(self, user_id: str) -> int:

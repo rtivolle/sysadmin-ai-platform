@@ -68,11 +68,21 @@ class RequestRegistry:
         async with self._lock:
             self._requests.pop(request_id, None)
 
+    def unregister_nowait(self, request_id: str) -> None:
+        """Drop a request record without awaiting.
+
+        Cancelled cleanup paths cannot await, so this is the synchronous
+        counterpart of unregister(). A dict pop is atomic under the GIL; the
+        readers below iterate over snapshots so an unlocked pop cannot raise
+        "dictionary changed size during iteration".
+        """
+        self._requests.pop(request_id, None)
+
     async def get_active_count(self, user_id: Optional[str] = None) -> int:
         async with self._lock:
             if user_id is None:
                 return len(self._requests)
-            return sum(1 for r in self._requests.values() if r.user_id == user_id)
+            return sum(1 for r in list(self._requests.values()) if r.user_id == user_id)
 
     async def cancel(
         self,
@@ -94,7 +104,7 @@ class RequestRegistry:
                         return False, None, f"Unauthorized: User {user_id} cannot cancel request owned by {record.user_id}"
                     target_record = record
             elif session_id:
-                for record in self._requests.values():
+                for record in list(self._requests.values()):
                     if record.session_id == session_id and record.user_id == user_id:
                         target_record = record
                         break

@@ -133,9 +133,14 @@ async def chat_endpoint(request_body: AgentChatRequest, request: Request):
             finally:
                 stop_renewal.set()
                 if lease_task:
-                    await asyncio.gather(lease_task, return_exceptions=True)
-                await asyncio.to_thread(quota_mgr.release_concurrency_slot, lease_id)
-                await registry.unregister(req_id)
+                    lease_task.cancel()
+                # Reclaim the lease and the registry entry before awaiting
+                # anything. A client that disconnects mid-stream cancels this
+                # generator, and the cancellation is re-delivered at the first
+                # await inside cleanup; awaiting here would skip the release and
+                # strand the user's in-flight slots until their TTL expires.
+                quota_mgr.release_concurrency_slot(lease_id)
+                registry.unregister_nowait(req_id)
 
         return StreamingResponse(sse_stream_wrapper(), media_type="text/event-stream")
 
@@ -153,9 +158,11 @@ async def chat_endpoint(request_body: AgentChatRequest, request: Request):
         finally:
             stop_renewal.set()
             if lease_task:
-                await asyncio.gather(lease_task, return_exceptions=True)
-            await asyncio.to_thread(quota_mgr.release_concurrency_slot, lease_id)
-            await registry.unregister(req_id)
+                lease_task.cancel()
+            # Cancellation is re-delivered at the first await inside cleanup, so
+            # reclaim the lease and the registry entry without awaiting.
+            quota_mgr.release_concurrency_slot(lease_id)
+            registry.unregister_nowait(req_id)
 
 @router.post("/cancel", response_model=AgentCancelResponse)
 async def cancel_endpoint(request_body: AgentCancelRequest, request: Request):
