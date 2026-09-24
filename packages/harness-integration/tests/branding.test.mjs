@@ -84,6 +84,12 @@ test('surfaceInjections publishes the signed-in user and not a filesystem path',
   assert.equal(JSON.stringify(row).includes('/data/'), false)
 })
 
+test('surfaceInjections publishes the title the client plugin pins in the tab', () => {
+  const [row] = surfaceInjections({ userId: 'sysadmin-02' })
+  assert.equal(row.value.title, 'Mila — Sysadmin AI')
+  assert.equal(row.value.user, 'sysadmin-02')
+})
+
 test('BRAND_TITLE matches the title injected into the document', () => {
   const out = brandIndexHtml(SAMPLE)
   const match = out.match(/<title>([^<]*)<\/title>/i)

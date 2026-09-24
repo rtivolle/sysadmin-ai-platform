@@ -171,6 +171,17 @@ window.__ModuleLoader__.load({
     const inject = ['slots']
 
     function apply(ctx) {
+      // The SPA retitles the document after boot; keep the Mila title in the
+      // tab. The observer covers later retitles (session names, shell boot).
+      const pinTitle = () => {
+        const expected = surfaceBoot().title || 'Mila — Sysadmin AI'
+        if (document.title !== expected) document.title = expected
+      }
+      pinTitle()
+      const titleElement = document.querySelector('title')
+      if (titleElement && typeof MutationObserver !== 'undefined') {
+        new MutationObserver(pinTitle).observe(titleElement, { subtree: true, childList: true, characterData: true })
+      }
       ctx.slots.inject('sidebar.brand.mark', () => ctx.slots.inject('sidebar.brand.name', function* registerBrand() {
         yield ctx.slots.register({ name: 'sidebar.brand.mark' }, MilaMark)
         yield ctx.slots.register({ name: 'sidebar.brand.name' }, MilaName)
