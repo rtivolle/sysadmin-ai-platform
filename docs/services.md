@@ -131,6 +131,17 @@ custom auth (per completion). Enforcement uses atomic Lua scripts.
 | Tokens / minute | 150,000 | 500,000 |
 | Tokens / day | 2,000,000 | 10,000,000 |
 
+These values are defaults. A per-user override is stored at
+`quota:limits:<user_id>` and read on every admission, so a change takes effect
+for new leases, RPM windows and daily reservations without a restart; running
+requests and already-counted usage are unaffected. `get_limits`/`set_limits`
+validate an override against `LIMIT_BOUNDS` — concurrency 1–10, rpm 1–10000,
+tpm 1–10,000,000, daily tokens 1–1,000,000,000 — and reject unknown fields,
+non-integers and out-of-range values. An empty object restores the defaults.
+An override applies during P1 elevation too. The admin API is
+`GET|POST /api/v1/admin/quotas` (see
+[http-api.md](http-api.md#get-apiv1adminquotas)); changes are audited.
+
 Additional behaviour:
 
 - **Leases** carry an owner, expiry and id; they are acquired atomically,
@@ -143,8 +154,10 @@ Additional behaviour:
   survive a restart.
 - **Fail closed**: when `VALKEY_URL` is configured (platform runs) and the
   shared store is unreachable, calls raise `ConnectionError`, surfaced as
-  `503`. Process-local fallback is only for development runs without
-  `VALKEY_URL`.
+  `503`. A stored override that fails validation (corrupt or out-of-range) is
+  treated the same way, so a bad policy entry cannot silently fall back to
+  permissive defaults. Process-local fallback is only for development runs
+  without `VALKEY_URL`.
 
 ---
 
@@ -207,9 +220,41 @@ check → syntax validation → out-of-band conflict detection → same-director
 backup with verification → `os.replace` atomic swap → post-deploy verification →
 automated rollback → success/audit retention.
 
+The conflict check hashes exact file bytes and binds the destination's
+existence at proposal time (a base hash implies the target existed; an approved
+creation implies it did not), so a target created, deleted or changed between
+approval and execution is rejected before replacement. Replacement preserves the
+destination's Unix mode and UID/GID; new configurations are created `0600`.
+Proposals, approval decisions and executions — including failed executions and
+denied claims — each emit an audit event (see
+[status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md)).
+
 `TARGET_ADAPTER_SIMULATION=1` makes `ServiceManager` return simulated results
 without invoking `systemctl`. See [security.md](security.md#6-target-adapter) for
 the qualifications this component still needs.
+
+---
+
+## Model manager
+
+**Package:** `backend/services/model_manager/`
+
+Admin-only local model lifecycle: register a HuggingFace repo, download its
+snapshot, run a local vLLM server, and publish the model through the inference
+engine and LiteLLM.
+
+| File | Responsibility |
+|---|---|
+| `registry.py` | Validated JSON registry (`backend/data/models/registry.json`, 0600, atomic writes); name/repo/revision validation; path confinement. |
+| `downloader.py` | `huggingface_hub.snapshot_download` with HF token, disk preflight, resume via the Hub cache, background jobs. |
+| `vllm_server.py` | Per-model `vllm serve` supervision: port allocation, readiness (`/health` + child liveness), SIGTERM/SIGKILL shutdown, log tail. |
+| `litellm_sync.py` | Rewrites the managed `model_list` block in `backend/config/litellm/config.yaml` and restarts LiteLLM. |
+| `router.py` | Admin-only `/api/v1/models*` endpoints; audit events. |
+
+State machine: `registered → downloading → downloaded → starting → running →
+stopped`, with `error` carrying `last_error`. The vLLM process, its port and the
+download job are recorded in the registry; the model becomes selectable only
+when `running`. Full details in [model-management.md](model-management.md).
 
 ---
 
@@ -218,9 +263,13 @@ the qualifications this component still needs.
 **Module:** `backend/services/inference_engine/server.py`
 
 An OpenAI-compatible facade on `:8000`. It always answers `/v1/models` with the
-`fast-model` and `heavy-model` aliases.
+`fast-model` and `heavy-model` aliases plus any locally running models from the
+model registry.
 
-- If `UPSTREAM_VLLM_URL` is set, requests are forwarded to
+- If the requested `model` is a running local model, the request is routed to
+  that model's own vLLM port; a registered-but-stopped model returns `503`
+  rather than a simulated answer.
+- Else if `UPSTREAM_VLLM_URL` is set, requests are forwarded to
   `<url>/v1/chat/completions` (streaming and non-streaming), with the original
   headers minus `host` and `content-length`.
 - Otherwise it returns deterministic simulated completions that emit valid ReAct
@@ -251,8 +300,13 @@ See [backup-restore.md](backup-restore.md).
 
 **Module:** `backend/services/hardware_survey.py`
 
-Collects OS, GPU, topology, CPU, RAM, cgroup v2, sandbox-readiness and storage
-facts, then derives an inference recommendation (TP layout, context length,
-local vs remote mode) from the detected GPU count/VRAM. `install.sh --survey`
-runs it; `platform.sh survey` and `platform.sh dashboard` expose it through the
-TUI. Results are exported to `backend/data/hardware_inventory.{json,md}`.
+Collects OS, GPU, PCI accelerator/device IDs and kernel drivers, topology, CPU,
+RAM, cgroup v2, sandbox-readiness and storage facts. It also reports the loaded
+accelerator modules, NVIDIA/AMD driver and toolkit versions, Python and ML
+package versions, and capacity plus recursively summed sizes of direct model
+store subdirectories. It derives an inference recommendation (TP layout,
+context length, local vs remote mode) from detected GPU count/VRAM.
+`install.sh --survey` runs it; `platform.sh survey` and `platform.sh dashboard`
+expose it through the TUI. Results are exported to
+`backend/data/hardware_inventory.{json,md}`; admins can also read the current
+survey from `GET /api/v1/survey` on the agent platform.

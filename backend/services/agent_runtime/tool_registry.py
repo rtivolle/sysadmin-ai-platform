@@ -120,6 +120,8 @@ def execute_tool_call(
             approval_id = parameters.get("approval_id")
             assigned_workspace = str(ensure_workspace(user_id))
             if os.path.realpath(workspace) != os.path.realpath(assigned_workspace):
+                duration_ms = int((time.time() - start_time) * 1000)
+                log_audit_event(user_id, session_id, tool_name, cmd, False, 126, duration_ms, action=tool_name, parameters=parameters, extra={"blocked": True, "reason": "Workspace does not match authenticated user"})
                 return {"status": "error", "error": "Workspace does not match authenticated user"}
 
             # 1. Safety check
@@ -138,6 +140,8 @@ def execute_tool_call(
             if safety["action"] == "APPROVAL_REQUIRED":
                 if not consume_approval(approval_id, user_id, session_id, cmd, assigned_workspace):
                     if approval_id:
+                        duration_ms = int((time.time() - start_time) * 1000)
+                        log_audit_event(user_id, session_id, tool_name, cmd, False, 126, duration_ms, action=tool_name, parameters=parameters, approval_id=approval_id, extra={"approval_denied": True, "reason": "Approval invalid, expired, mismatched, or already used"})
                         return {"status": "blocked", "blocked": True, "reason": "Approval invalid, expired, mismatched, or already used"}
                     new_appr_id = create_approval_request(user_id, session_id, cmd, safety["reason"], assigned_workspace)
                     duration_ms = int((time.time() - start_time) * 1000)
@@ -161,6 +165,8 @@ def execute_tool_call(
             }
 
         else:
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_audit_event(user_id, session_id, tool_name, parameters.get("command", ""), False, 127, duration_ms, action=tool_name, parameters=parameters, extra={"unknown_tool": True})
             return {"status": "error", "error": f"Unknown tool: {tool_name}"}
 
         duration_ms = int((time.time() - start_time) * 1000)

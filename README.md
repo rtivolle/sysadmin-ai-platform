@@ -42,13 +42,14 @@ The CLI defaults to `SYSADMIN_USER=sysadmin-01`. Administrator commands use
 |---|---|
 | **Identity & auth** | Bearer tokens + PBKDF2 logins via ForwardAuth; `X-User`/`X-Forwarded-*` headers are stripped and re-validated from credentials. |
 | **Inference routing** | LiteLLM gateway with per-user virtual keys; local engine simulates unless `UPSTREAM_VLLM_URL` points at vLLM. |
-| **Quotas** | Per-user concurrency leases (2 in-flight, 6 during P1), RPM, TPM and daily token budgets with atomic reservation/settlement in Valkey. |
+| **Quotas** | Per-user concurrency leases (2 in-flight, 6 during P1), RPM, TPM and daily token budgets with atomic reservation/settlement in Valkey; defaults are overridable per user by an administrator (`GET|POST /api/v1/admin/quotas`). |
 | **Agent runtime** | ReAct loop, session store, tool registry and parser in `backend/services/agent_runtime/`. |
 | **Bounded tools** | Streaming log search, Markdown runbook reader, JSON/YAML/systemd linter + unified diff, sandboxed shell. |
 | **Approval gate** | Human-in-the-loop state machine bound to user, session, command, target, workspace, content hash and 5-minute expiry. |
 | **Sandbox** | Bubblewrap namespaces, no network, dropped caps, read-only `/usr`, `memory.max=4 GiB` with `memory.swap.max=0`, `pids.max=128`, `cpu.max=200%`, 15 s deadline. |
 | **Audit** | Structured events to VictoriaLogs; local outbox fsyncs when the collector is down and replays in order. |
 | **Target adapter** | Scoped allow-list of service actions and staged config deployment; not production-qualified. |
+| **Model management** | Admin-only HuggingFace snapshot download plus one local vLLM server per model; a running model appears in `/v1/models` and LiteLLM. Not yet qualified on a GPU host. |
 | **Resilience** | Backup/restore/DR drill helpers in `backend/services/resilience/`. |
 | **Harness integration** | Optional DeepSeek Harness profile, plugin and multi-user gateway in `packages/harness-integration/`. |
 
@@ -58,8 +59,9 @@ The CLI defaults to `SYSADMIN_USER=sysadmin-01`. Administrator commands use
 
 | Check | Result |
 |---|---|
-| Full backend suite, live stack | **356 passed, 0 failed, 0 skipped** |
-| Full suite, Valkey up / services stopped | **423 passed, 13 skipped** |
+| Full backend suite, live stack (earlier run) | **356 passed, 0 failed, 0 skipped** |
+| Full backend suite, stack up except Traefik (2026-09-24) | **480 passed, 8 skipped, 0 failed** |
+| Full suite, Valkey up / services stopped (earlier run) | **423 passed, 13 skipped** |
 | Tier 2 sandbox suite | **129 passed** |
 | 30-task synthetic benchmark | **31 cases passed** |
 | Harness integration | **45 node tests + 8/8 real-`dsh` checks + 37/37 live gateway checks** |
@@ -154,8 +156,12 @@ docs/                         architecture, security, API, ops, testing, status
   staging deployment run.
 - Multi-worker Valkey integration test under real load.
 - Real owner-scored 30-task field evaluation.
-- Event-by-event audit completeness census.
+- Audit completeness: close the five open gaps in the census (runtime chat
+  turns, LiteLLM call failures, quota denials, auth login/logout/`401`s,
+  cancellation) and prove query completeness against a live store.
 - Full restore drill against clean staging with measured RTO/RPO.
+- Qualify local model serving on the GPU host (real HuggingFace download + vLLM
+  start, GPU-fit check).
 - Kernel-backed sandbox stress run for the raw cgroup-delegation leg on the
   platform account's delegated subtree.
 
@@ -173,7 +179,10 @@ backlog and corrections.
 - Security model: [`docs/security.md`](docs/security.md)
 - HTTP API: [`docs/http-api.md`](docs/http-api.md)
 - Operations: [`docs/operations.md`](docs/operations.md)
+- Model management: [`docs/model-management.md`](docs/model-management.md)
 - Testing: [`docs/testing.md`](docs/testing.md)
+- Verification status: [`docs/status/TEST_READY.md`](docs/status/TEST_READY.md)
+- Audit census: [`docs/status/AUDIT_CENSUS.md`](docs/status/AUDIT_CENSUS.md)
 - Development: [`docs/development.md`](docs/development.md)
 - Harness integration: [`packages/harness-integration/README.md`](packages/harness-integration/README.md)
 

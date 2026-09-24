@@ -84,6 +84,7 @@ class ApprovalGate:
             "status": "pending",
             "target": target,
             "action": action,
+            "command": command,
             "content_hash": content_hash,
             "base_hash": base_hash,
             "created_at": now,

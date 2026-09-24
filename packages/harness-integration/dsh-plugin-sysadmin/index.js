@@ -21,7 +21,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { AuditSink, DEFAULT_VICTORIALOGS_URL } from './lib/audit.js'
 import { BackendClient, BackendError } from './lib/backend.js'
-import { brandIndexHtml, BRAND_TITLE } from './lib/branding.js'
+import { brandIndexHtml, BRAND_TITLE, surfaceInjections } from './lib/branding.js'
+import { listSurface, SURFACE_PATH, SurfaceError } from './lib/surface.js'
 import { POLICY_ACTIONS, commandFromToolCall, evaluateCommandSafety } from './lib/policy.js'
 
 export const name = 'sysadmin-harness'
@@ -225,11 +226,31 @@ export function apply(ctx, config) {
   // runs in a headless profile.
   ctx.inject(['webServer'], (webCtx) => {
     try {
+      webCtx.on('webserver/index-inject', (table) => {
+        for (const row of surfaceInjections({ userId: config.userId })) table.push(row)
+      })
       webCtx.effect(() => webCtx.webServer.tapIndex((html) => brandIndexHtml(html)))
+      webCtx.effect(() => webCtx.webServer.register({
+        kind: 'exact',
+        path: SURFACE_PATH,
+        handler: (req, res) => handleSurface(req, res, process.cwd(), config.userId),
+      }))
       webCtx.logger?.info?.(`[sysadmin-harness] Mila branding applied to the web index`)
     } catch (error) {
       webCtx.logger?.warn?.(`[sysadmin-harness] could not apply Mila branding: ${error instanceof Error ? error.message : String(error)}`)
     }
+  })
+
+  // The sidebar groups sessions under a workspace. Creating the user's
+  // directory here makes that directory — and its files — visible without a
+  // manual folder picker. Missing in headless compositions; inject no-ops.
+  ctx.inject(['workspaceRegistry'], (wsCtx) => {
+    const root = process.cwd()
+    const title = config.userId
+    wsCtx.workspaceRegistry.create(root, title).then(
+      () => wsCtx.logger?.info?.(`[sysadmin-harness] workspace listed for ${title}`),
+      (error) => wsCtx.logger?.warn?.(`[sysadmin-harness] could not list workspace for ${title}: ${error instanceof Error ? error.message : String(error)}`),
+    )
   })
 
   const banner = `[sysadmin-harness] loaded user=${config.userId} backend=${config.backendBaseUrl} policy=${config.enforceCommandPolicy ? 'on' : 'off'}`
@@ -237,4 +258,39 @@ export function apply(ctx, config) {
   // A startup banner on stdout is deliberate: it is the evidence operators and
   // the verification script use to confirm the bundle actually loaded.
   console.log(banner)
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {string} workspaceRoot
+ * @param {string} userId
+ */
+function handleSurface(req, res, workspaceRoot, userId) {
+  if (req.method !== 'GET') {
+    res.writeHead(405, {
+      allow: 'GET',
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    res.end(JSON.stringify({ detail: 'Method not allowed' }))
+    return
+  }
+  const url = new URL(req.url ?? SURFACE_PATH, 'http://127.0.0.1')
+  try {
+    const body = listSurface(workspaceRoot, userId, url.searchParams.get('path') ?? '')
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    res.end(JSON.stringify(body))
+  } catch (error) {
+    const status = error instanceof SurfaceError ? error.status : 500
+    const detail = error instanceof SurfaceError ? error.message : 'workspace listing failed'
+    res.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    res.end(JSON.stringify({ detail }))
+  }
 }

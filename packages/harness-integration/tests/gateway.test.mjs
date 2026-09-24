@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 
-import { loadConfig } from '../gateway/config.js'
+import { isBareAuthority, loadConfig, trustedHostList } from '../gateway/config.js'
 import {
   assertSafeUserId,
   findFreePort,
@@ -21,7 +21,7 @@ import {
   provisionProfile,
   readUserToken,
 } from '../gateway/instance-manager.js'
-import { createGateway, parseCredentials } from '../gateway/server.js'
+import { browserProxyHeaders, createGateway, parseCredentials } from '../gateway/server.js'
 import { parseCookies, SessionStore } from '../gateway/session-store.js'
 
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-gateway-'))
@@ -59,6 +59,31 @@ test('cookie parsing tolerates junk and decodes values', () => {
   assert.equal(cookies.a, '1')
   assert.equal(cookies.b, '2')
   assert.equal(cookies.sysadmin_gateway, 'abc def')
+})
+
+test('proxy keeps the browser Host instead of the loopback instance port', () => {
+  const headers = browserProxyHeaders({
+    host: '192.168.14.159:3085',
+    origin: 'http://192.168.14.159:3085',
+    connection: 'keep-alive',
+    upgrade: 'websocket',
+  }, { host: '127.0.0.1', port: 3180 })
+  assert.equal(headers.host, '192.168.14.159:3085')
+  assert.equal(headers.origin, 'http://192.168.14.159:3085')
+  assert.equal(headers.connection, undefined)
+  assert.equal(headers.upgrade, undefined)
+  assert.equal(browserProxyHeaders({}, { host: '127.0.0.1', port: 3180 }).host, '127.0.0.1:3180')
+})
+
+test('trusted hosts are bare authorities and include this host LAN addresses', () => {
+  assert.equal(isBareAuthority('192.168.14.159'), true)
+  assert.equal(isBareAuthority('192.168.14.159:3085'), true)
+  assert.equal(isBareAuthority('app.internal/path'), false)
+  assert.equal(isBareAuthority('user@host'), false)
+  const listed = trustedHostList({ SYSADMIN_TRUSTED_HOSTS: 'mila.example, not a host' })
+  assert.ok(listed.includes('mila.example'))
+  assert.equal(listed.includes('not a host'), false)
+  for (const entry of listed) assert.equal(isBareAuthority(entry), true)
 })
 
 test('login body parsing accepts JSON and form encodings', () => {

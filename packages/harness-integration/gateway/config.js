@@ -6,6 +6,7 @@
  * harness instance owned by the same identity. Every path here can be overridden
  * by environment so the same code runs in a scratch test home and in production.
  */
+import { networkInterfaces } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -108,4 +109,54 @@ function urlPort(url, fallback) {
 export function toInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10)
   return Number.isFinite(parsed) ? parsed : fallback
+}
+
+/**
+ * Whether a trusted-host entry is a bare `host` or `host:port` authority.
+ * The harness refuses anything WHATWG would rewrite, so invalid extras are
+ * dropped here instead of failing the user's instance at boot.
+ *
+ * @param {string} entry
+ * @returns {boolean}
+ */
+export function isBareAuthority(entry) {
+  try {
+    const parsed = new URL(`http://${entry}`)
+    if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) return false
+    const canonical = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname
+    return canonical === entry.toLowerCase()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Authorities the per-user harness may treat as the browser it is serving.
+ *
+ * Loopback is trusted by the harness itself. A port-less IP matches every
+ * port, which is what a gateway on :3085 needs when the instance listens on
+ * another loopback port. `SYSADMIN_TRUSTED_HOSTS` adds hostnames.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]}
+ */
+export function trustedHostList(env = process.env) {
+  /** @type {string[]} */
+  const hosts = []
+  const seen = new Set()
+  const add = (entry) => {
+    const value = String(entry ?? '').trim()
+    const key = value.toLowerCase()
+    if (!value || seen.has(key) || !isBareAuthority(value)) return
+    seen.add(key)
+    hosts.push(value)
+  }
+  for (const list of Object.values(networkInterfaces())) {
+    for (const iface of list ?? []) {
+      if (iface.internal || iface.family !== 'IPv4') continue
+      add(iface.address)
+    }
+  }
+  for (const part of String(env.SYSADMIN_TRUSTED_HOSTS ?? '').split(',')) add(part)
+  return hosts
 }

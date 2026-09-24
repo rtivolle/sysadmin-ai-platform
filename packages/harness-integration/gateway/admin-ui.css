@@ -1,4 +1,6 @@
 /* Admin-console-only layout; colors and primitives live in assets/brand.css. */
+[hidden] { display: none !important; }
+
 #login-view .mila-card form {
   display: block;
 }
@@ -32,3 +34,22 @@ code {
 .mila-log[hidden] {
   display: none;
 }
+
+.quota-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr));
+  gap: 1rem;
+}
+
+.quota-card {
+  padding: 1rem;
+  border: 1px solid #d9dce6;
+  border-radius: 8px;
+  background: white;
+}
+
+.quota-card h3 { margin: 0 0 .75rem; }
+.quota-card label { display: block; margin-bottom: .75rem; font-size: .85rem; }
+.quota-card input { margin-top: .25rem; width: 100%; box-sizing: border-box; }
+.quota-card .mila-row { flex-wrap: wrap; }
+.mila-section { overflow-x: auto; }

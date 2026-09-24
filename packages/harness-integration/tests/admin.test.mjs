@@ -17,7 +17,7 @@ const MASTER = 'test-master-token'
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-admin-'))
 const keysDir = join(scratch, 'keys')
 const commandLog = join(scratch, 'commands.log')
-const stubState = { lastAuthorization: null }
+const stubState = { lastAuthorization: null, quotaBody: null, quotaStatus: 200, modelsStatus: 200, modelBody: null }
 
 let gateway, gatewayUrl = '', adminCookie = '', agent, victoria, auth
 
@@ -42,7 +42,7 @@ function sendJson(res, status, payload) {
 }
 /** Executable stub that records its argv and exits 0. */
 function writeStub(file, label) {
-  writeFileSync(file, `#!/usr/bin/env bash\nprintf '%s\\n' "${label} $*" >> "${commandLog}"\necho "${label} $*"\n`)
+  writeFileSync(file, `#!/usr/bin/env bash\nprintf '%s\\n' "${label} $*" "agent-port=\${SYSADMIN_AGENT_PORT:-unset}" >> "${commandLog}"\necho "${label} $*"\n`)
   chmodSync(file, 0o755)
 }
 function adminFetch(path, { method = 'GET', body, cookie = adminCookie, headers = {} } = {}) {
@@ -95,7 +95,29 @@ before(async () => {
           return sendJson(res, 200, { success: true, approval: { approval_id: 'APR-1', approved: true } })
         }
       }
+      if (req.url?.startsWith('/api/v1/models')) {
+        stubState.lastAuthorization = bearer
+        if (bearer !== `Bearer ${MASTER}`) return sendJson(res, 401, { detail: 'unauthorized' })
+        if (req.method === 'GET' && req.url === '/api/v1/models') {
+          return sendJson(res, 200, { models: [{ name: 'local-1', hf_repo: 'org/local-1', status: 'running', server: { port: 8100, pid: 1 } }] })
+        }
+        if (req.method === 'POST' && req.url === '/api/v1/models') {
+          stubState.modelBody = JSON.parse(raw || '{}')
+          return sendJson(res, 201, { model: { name: 'local-1' } })
+        }
+        if (req.method === 'POST' && req.url.endsWith('/start')) return sendJson(res, 202, { status: 'starting' })
+        if (req.method === 'DELETE') return sendJson(res, 200, { status: 'deleted' })
+        return sendJson(res, 200, { status: 'ok' })
+      }
+      if (req.url?.startsWith('/api/v1/survey')) {
+        if (bearer !== `Bearer ${MASTER}`) return sendJson(res, 401, { detail: 'unauthorized' })
+        return sendJson(res, 200, { hostname: 'stub-host', gpus: [], pci_accelerators: [], driver_stack: {}, software_versions: { python: '3' }, model_storage: { entries: [] } })
+      }
       if (req.method === 'GET' && req.url === '/health') return sendJson(res, 200, { status: 'healthy' })
+      if (req.method === 'GET' && req.url === '/v1/models') {
+        assert.equal(bearer, `Bearer ${MASTER}`)
+        return sendJson(res, stubState.modelsStatus, { data: [{ id: 'fast-model', owned_by: 'local', api_key: 'must-not-leak' }] })
+      }
       return sendJson(res, 404, { detail: 'not found' })
     })
   })
@@ -106,12 +128,25 @@ before(async () => {
     }
     return sendJson(res, 404, { detail: 'not found' })
   })
-  auth = await listen((req, res) => req.method === 'POST' && req.url === '/api/v1/auth/login'
-    ? sendJson(res, 200, { user: 'sysadmin-01', role: 'sysadmin' })
-    : sendJson(res, 404, { detail: 'not found' }))
+  auth = await listen((req, res) => {
+    if (req.url?.startsWith('/api/v1/admin/quotas')) {
+      assert.equal(req.headers.authorization, `Bearer ${MASTER}`)
+      let raw = ''
+      req.on('data', (chunk) => { raw += chunk })
+      req.on('end', () => {
+        if (req.method === 'POST') stubState.quotaBody = JSON.parse(raw)
+        sendJson(res, stubState.quotaStatus, stubState.quotaStatus === 200 ? { users: [], status: 'updated' } : { detail: 'store unavailable' })
+      })
+      return
+    }
+    return req.method === 'POST' && req.url === '/api/v1/auth/login'
+      ? sendJson(res, 200, { user: 'sysadmin-01', role: 'sysadmin' })
+      : sendJson(res, 404, { detail: 'not found' })
+  })
 
   const config = {
     ...loadConfig({}),
+    services: { ...loadConfig({}).services, agent_tools: { port: 3090 } },
     stateRoot: scratch,
     sessionsFile: join(scratch, 'sessions.jsonl'),
     adminSessionsFile: join(scratch, 'admin-sessions.jsonl'),
@@ -124,6 +159,7 @@ before(async () => {
     platformSh: join(scratch, 'platform.sh'),
     backendRoot: scratch,
     agentUrl: agent.url,
+    litellmUrl: `${agent.url}/v1`,
     authUrl: auth.url,
     victoriaLogsUrl: victoria.url,
     instanceRegistryDir: join(scratch, 'instances'),
@@ -292,5 +328,69 @@ test('reports service pids and restarts a service through platform.sh', async ()
 
   assert.equal((await adminFetch('/api/admin/services/audit_outbox/restart', { method: 'POST' })).status, 200)
   assert.match(readFileSync(commandLog, 'utf8'), /service audit_outbox restart/)
+  assert.match(readFileSync(commandLog, 'utf8'), /agent-port=3090/)
   assert.equal((await adminFetch('/api/admin/services/nope/restart', { method: 'POST' })).status, 404)
+})
+
+test('quota controls require admin and CSRF protection and propagate store failures', async () => {
+  assert.equal((await adminFetch('/api/admin/quotas', { cookie: '' })).status, 401)
+  const path = '/api/admin/quotas/sysadmin-01'
+  const body = { limits: { rpm: 12, daily_tokens: 5000 } }
+  assert.equal((await adminFetch(path, { method: 'POST', body, headers: { origin: 'http://evil.example' } })).status, 403)
+  assert.equal((await adminFetch(path, { method: 'POST', body })).status, 200)
+  assert.deepEqual(stubState.quotaBody, body)
+  assert.equal((await adminFetch('/api/admin/quotas')).status, 200)
+  stubState.quotaStatus = 503
+  try {
+    assert.equal((await adminFetch(path, { method: 'POST', body })).status, 503)
+    assert.equal((await adminFetch('/api/admin/quotas')).status, 503)
+  } finally { stubState.quotaStatus = 200 }
+})
+
+test('model catalog is authenticated, sanitized and reports provider failure', async () => {
+  assert.equal((await adminFetch('/api/admin/models', { cookie: '' })).status, 401)
+  const response = await adminFetch('/api/admin/models')
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.deepEqual(body.models, [{ id: 'fast-model', owned_by: 'local' }])
+  assert.ok(!JSON.stringify(body).includes('must-not-leak'))
+  stubState.modelsStatus = 503
+  try {
+    assert.equal((await adminFetch('/api/admin/models')).status, 503)
+  } finally { stubState.modelsStatus = 200 }
+})
+
+test('local model management is authenticated, CSRF-guarded and proxied', async () => {
+  assert.equal((await adminFetch('/api/admin/local-models', { cookie: '' })).status, 401)
+  const listed = await adminFetch('/api/admin/local-models')
+  assert.equal(listed.status, 200)
+  assert.equal((await listed.json()).models[0].name, 'local-1')
+
+  const registered = await adminFetch('/api/admin/local-models', { method: 'POST', body: { hf_repo: 'org/local-1' } })
+  assert.equal(registered.status, 201)
+  assert.deepEqual(stubState.modelBody, { hf_repo: 'org/local-1' })
+
+  assert.equal((await adminFetch('/api/admin/local-models/local-1/start', { method: 'POST', body: {} })).status, 202)
+  assert.equal(
+    (await adminFetch('/api/admin/local-models/local-1/start', { method: 'POST', body: {}, headers: { origin: 'http://evil.example' } })).status,
+    403,
+  )
+  assert.equal((await adminFetch('/api/admin/local-models/local-1/delete?delete_files=1', { method: 'POST', body: {} })).status, 200)
+})
+
+test('hardware survey is authenticated and proxied to the agent platform', async () => {
+  assert.equal((await adminFetch('/api/admin/survey', { cookie: '' })).status, 401)
+  const response = await adminFetch('/api/admin/survey?refresh=1')
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).hostname, 'stub-host')
+})
+
+test('starts and stops allowlisted services without allowing self-termination', async () => {
+  for (const action of ['start', 'stop']) {
+    const response = await adminFetch(`/api/admin/services/audit_outbox/${action}`, { method: 'POST', body: {} })
+    assert.equal(response.status, 200)
+    assert.ok(readFileSync(commandLog, 'utf8').includes(`service audit_outbox ${action}`))
+    assert.equal((await adminFetch(`/api/admin/services/nope/${action}`, { method: 'POST', body: {} })).status, 404)
+    assert.equal((await adminFetch(`/api/admin/services/harness_gateway/${action}`, { method: 'POST', body: {} })).status, 409)
+  }
 })

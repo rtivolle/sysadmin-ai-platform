@@ -110,9 +110,9 @@ class TargetAdapter:
 
             # Calculate base hash if destination exists
             if os.path.exists(canonical_target):
-                with open(canonical_target, "r", encoding="utf-8", errors="replace") as f:
+                with open(canonical_target, "rb") as f:
                     base_content = f.read()
-                base_hash = hashlib.sha256(base_content.encode("utf-8")).hexdigest()
+                base_hash = hashlib.sha256(base_content).hexdigest()
 
             prop_res = self.gate.propose(
                 user_id=req.user_id,
@@ -130,6 +130,19 @@ class TargetAdapter:
 
         if not prop_res.get("success"):
             raise ValueError(f"Proposal failed: {prop_res.get('error')}")
+
+        log_audit_event(
+            user_id=req.user_id,
+            session_id=req.session_id or "",
+            tool_name=f"adapter_{req.action}",
+            action=req.action,
+            parameters={"target": prop_res["target"], "action": req.action},
+            command=prop_res.get("command", ""),
+            approval_id=prop_res["approval_id"],
+            exit_code=0,
+            duration_ms=0,
+            extra={"approval_required": True, "approval_id": prop_res["approval_id"], "reason": req.reason},
+        )
 
         return ProposalResponse(
             approval_id=prop_res["approval_id"],
@@ -150,13 +163,33 @@ class TargetAdapter:
         and logs to VictoriaLogs audit stream.
         """
         start_time = time.time()
+
+        def _audit_failure(action: str, message: str, blocked: bool = False) -> None:
+            """Audit a denied or failed execution attempt (success paths audit below)."""
+            extra: Dict[str, Any] = {"error": message}
+            if blocked:
+                extra["blocked"] = True
+            log_audit_event(
+                user_id=req.user_id,
+                session_id=req.session_id or "",
+                tool_name="adapter_execute",
+                action=action,
+                parameters={"approval_id": req.approval_id},
+                approval_id=req.approval_id,
+                exit_code=1,
+                duration_ms=int((time.time() - start_time) * 1000),
+                extra=extra,
+            )
+
         record = self.gate.get_status(req.approval_id)
         if not record:
+            message = f"Approval token '{req.approval_id}' not found"
+            _audit_failure("execute", message)
             return ExecutionResponse(
                 approval_id=req.approval_id,
                 status="failed",
                 exit_code=1,
-                message=f"Approval token '{req.approval_id}' not found",
+                message=message,
             )
 
         # Atomic claim transition: approved -> executing
@@ -170,11 +203,13 @@ class TargetAdapter:
         )
 
         if not claim.get("success"):
+            message = f"Claim failed: {claim.get('error', claim.get('code'))}"
+            _audit_failure(record.get("action") or "execute", message, blocked=True)
             return ExecutionResponse(
                 approval_id=req.approval_id,
                 status="failed",
                 exit_code=1,
-                message=f"Claim failed: {claim.get('error', claim.get('code'))}",
+                message=message,
             )
 
         action = record.get("action")
@@ -226,7 +261,8 @@ class TargetAdapter:
             try:
                 staged_content = self._read_staged_content(workspace_dir, staged_file)
             except (OSError, ValueError, PermissionError) as exc:
-                self.gate.complete_execution(req.approval_id, is_success=False, exit_code=1, result_summary="Staged file unavailable")
+                self.gate.complete_execution(approval_id=req.approval_id, is_success=False, exit_code=1, result_summary="Staged file unavailable")
+                _audit_failure("config_deploy", f"Staged file unavailable at execution time: {exc}")
                 return ExecutionResponse(
                     approval_id=req.approval_id,
                     status="failed",
@@ -241,6 +277,7 @@ class TargetAdapter:
                 staged_content=staged_content,
                 proposed_hash=record.get("content_hash"),
                 base_hash=record.get("base_hash"),
+                expected_target_exists=record.get("base_hash") is not None,
             )
 
             is_success = deploy_res.get("success", False)
@@ -284,6 +321,7 @@ class TargetAdapter:
             )
 
         else:
+            _audit_failure(str(action), f"Unknown action: {action}")
             return ExecutionResponse(
                 approval_id=req.approval_id,
                 status="failed",

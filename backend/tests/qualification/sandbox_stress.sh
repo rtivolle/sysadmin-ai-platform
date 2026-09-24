@@ -79,16 +79,46 @@ for n in range(1, 25):                  # 24 x 256 MiB = 6 GiB > 4 GiB ceiling
     print(f"CHUNK_{n}", flush=True)
 print("SURVIVED", flush=True)
 EOF
-  # Only bash builtins after the spawn loop: once pids.max is reached the
-  # shell cannot fork wc/grep/sleep, so external tools would report nothing.
+  # pids-ceiling probe: 400 background-spawn attempts against the kernel
+  # 128-task ceiling (TasksMax / pids.max). bash 5.x treats a failed fork()
+  # for a background job as FATAL to a non-interactive script: EAGAIN is
+  # retried with 1/2/4/8 s backoff sleeps, then the shell aborts (exit 254);
+  # a backoff sleep interrupted by SIGCHLD (children exiting) aborts even
+  # earlier on EINTR. The spawn loop therefore runs in a dedicated
+  # background subshell whose death cannot take down the reporting shell,
+  # and once the ceiling is reached no fork() is possible at all, so the
+  # measurement phase uses only bash builtins (no external commands).
   cat >"$ws/pids.sh" <<'EOF'
 #!/bin/bash
-for i in {1..400}; do /usr/bin/sleep 8 & done 2>/workspace/fork_err.txt
-for k in {1..400000}; do :; done
-j=($(jobs -p))
-echo "RUNNING=${#j[@]}"
-kill $(jobs -p) 2>/dev/null
-wait 2>/dev/null
+attempts=400
+: > /workspace/spawned.txt
+# Fork-free timer: this child holds fd 8 open and silent for 30 s, so
+# "read -t" on it is a pure-builtin sleep.
+exec 8< <(exec /usr/bin/sleep 30)
+holder=$!
+# Spawn generator: one progress line per SUCCESSFUL spawn. When fork()
+# starts failing at the ceiling this subshell dies on its own; the sleeps
+# it spawned (25 s each) are still alive when measured below. The kernel
+# fork errors on its stderr are kept as corroborating evidence.
+(
+  for i in {1..400}; do
+    /usr/bin/sleep 25 &
+    echo x >> /workspace/spawned.txt
+  done
+  wait
+) 2>>/workspace/fork_err.txt &
+read -t 5 -u 8 || true   # the ceiling is reached in <1 s; measure at 5 s
+# Count live tasks in the private PID namespace: builtin glob, no fork.
+procs=0
+for d in /proc/[0-9]*; do procs=$((procs+1)); done
+# Count successful spawns: builtin read loop, no fork. Every other attempt
+# hit the kernel ceiling and failed.
+spawned=0
+while IFS= read -r _; do spawned=$((spawned+1)); done < /workspace/spawned.txt
+failed=$((attempts - spawned))
+echo "PIDS_RESULT attempts=$attempts spawned=$spawned failed=$failed procs=$procs"
+kill "$holder" 2>/dev/null
+exit 0
 EOF
   cat >"$ws/cpu.sh" <<'EOF'
 #!/bin/bash
@@ -158,19 +188,32 @@ run_enforcement_scenarios() {
 
   # 3. task ceiling ------------------------------------------------------------
   run_in_sandbox "$stub" "$ws" "$od/pids" /usr/bin/bash /workspace/pids.sh
-  local running forkers
-  running=$(sed -n 's/^RUNNING=//p' "$od/pids/out")
-  # Fork failures are counted on the host: inside the exhausted sandbox the
-  # shell can no longer fork grep/wc to count them itself.
+  local pline attempts spawned failed procs forkers
+  pline=$(grep '^PIDS_RESULT ' "$od/pids/out" | tail -1)
+  attempts=$(echo "$pline" | sed -n 's/.* attempts=\([0-9][0-9]*\).*/\1/p')
+  spawned=$(echo "$pline" | sed -n 's/.* spawned=\([0-9][0-9]*\).*/\1/p')
+  failed=$(echo "$pline" | sed -n 's/.* failed=\([0-9][0-9]*\).*/\1/p')
+  procs=$(echo "$pline" | sed -n 's/.* procs=\([0-9][0-9]*\).*/\1/p')
+  # Kernel fork errors are counted on the host: inside the exhausted sandbox
+  # the shell can no longer fork grep/wc to count them itself.
   forkers=$(grep -c -i 'fork' "$ws/fork_err.txt" 2>/dev/null || echo 0)
   forkers=${forkers//[^0-9]/}
   [ -n "$forkers" ] || forkers=0
-  if [ -z "$running" ] || [ -z "$forkers" ]; then
-    fail "$p-pids-ceiling" "no RUNNING/FORK_ERRORS markers (rc=$RC): $(tail -2 "$od/pids/err")"
-  elif [ "$running" -le 128 ] && [ "$running" -ge 64 ] && [ "$forkers" -ge 1 ]; then
-    pass "$p-pids-ceiling" "of 400 spawn attempts, $running ran concurrently, $forkers fork failures (ceiling 128)"
+  # Bounds justification (measured on this host, leg A: spawned=122,
+  # procs=126, failed=278, stable across runs): the kernel caps the whole
+  # cgroup at 128 tasks INCLUDING the ~6 infrastructure tasks (timeout, bwrap
+  # x2, script shell, spawn subshell, timer child), so concurrent spawns and
+  # namespace processes may never exceed 128; the >=100 floor proves the
+  # probe really reached the ceiling region instead of dying early. Every
+  # successful spawn is still alive at measurement time (25 s sleeps measured
+  # at 5 s), so at least 400-128=272 attempts must have failed. forkers>=1
+  # requires the kernel's own EAGAIN messages as corroboration.
+  if [ -z "$spawned" ] || [ -z "$failed" ] || [ -z "$procs" ]; then
+    fail "$p-pids-ceiling" "no PIDS_RESULT marker (rc=$RC): $(tail -2 "$od/pids/err")"
+  elif [ "$spawned" -le 128 ] && [ "$spawned" -ge 100 ] && [ "$procs" -le 128 ] && [ "$procs" -ge 100 ] && [ "$failed" -ge 272 ] && [ "$forkers" -ge 1 ]; then
+    pass "$p-pids-ceiling" "of $attempts spawn attempts, $spawned ran concurrently ($procs namespace tasks), $failed fork failures (ceiling 128)"
   else
-    fail "$p-pids-ceiling" "RUNNING=$running FORK_ERRORS=$forkers - expected RUNNING in [64,128] with fork failures"
+    fail "$p-pids-ceiling" "attempts=$attempts spawned=$spawned failed=$failed procs=$procs forkers=$forkers - expected spawned/procs in [100,128], failed >= 272, kernel fork errors"
   fi
 
   # 4. CPU quota throttling ----------------------------------------------------

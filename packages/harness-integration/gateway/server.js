@@ -33,6 +33,27 @@ const HOP_BY_HOP = new Set([
   'te', 'trailers', 'transfer-encoding', 'upgrade',
 ])
 
+/**
+ * Headers forwarded to a user's harness instance.
+ *
+ * The browser Host is preserved. The harness binds its session cookie and its
+ * Origin check to that header; rewriting it to the loopback instance port
+ * makes every API call 403, so the UI stays stuck behind login.
+ *
+ * @param {import('node:http').IncomingHttpHeaders} headers
+ * @param {{ host: string, port: number }} instance
+ * @returns {import('node:http').OutgoingHttpHeaders}
+ */
+export function browserProxyHeaders(headers, instance) {
+  /** @type {import('node:http').OutgoingHttpHeaders} */
+  const next = { ...headers }
+  for (const name of Object.keys(next)) {
+    if (HOP_BY_HOP.has(name.toLowerCase())) delete next[name]
+  }
+  if (!next.host) next.host = `${instance.host}:${instance.port}`
+  return next
+}
+
 const MAX_LOGIN_BODY_BYTES = 16 * 1024
 const TOKEN_RECOVERY_COOLDOWN_MS = 60_000
 
@@ -265,11 +286,7 @@ export function createGateway({
    * @param {URL} url
    */
   function proxyHttp(req, res, instance, url) {
-    const headers = { ...req.headers }
-    for (const name of Object.keys(headers)) {
-      if (HOP_BY_HOP.has(name.toLowerCase())) delete headers[name]
-    }
-    headers.host = `${config.instanceHost}:${instance.port}`
+    const headers = browserProxyHeaders(req.headers, { host: config.instanceHost, port: instance.port })
 
     const upstream = httpRequest(
       {
@@ -346,8 +363,7 @@ export function createGateway({
     const instance = await instances.ensure(session.userId)
     instances.touch?.(session.userId)
     const upstream = netConnect(instance.port, config.instanceHost, () => {
-      const headers = { ...req.headers, host: `${config.instanceHost}:${instance.port}` }
-      delete headers.upgrade
+      const headers = browserProxyHeaders(req.headers, { host: config.instanceHost, port: instance.port })
       const lines = [`${req.method} ${req.url} HTTP/1.1`]
       for (const [name, value] of Object.entries(headers)) {
         if (value === undefined) continue

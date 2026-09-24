@@ -77,12 +77,15 @@ sysadmin-chat                 CLI launcher
 
 ### Change a quota or policy default
 
-1. Update the code (source of truth) and
+1. Update the code defaults (source of truth) and
    `backend/config/platform_config.json` for documentation.
-2. Update the tables in [configuration.md](configuration.md) and
-   [security.md](security.md).
-3. Add/adjust tests in `tier1_unit/test_quota_fail_closed.py` and the tier-3
-   suites.
+2. To change one user's limits without a code change, use the admin quota API
+   (`GET|POST /api/v1/admin/quotas`) or the console's *Quotas* tab; the override
+   is stored in Valkey and applies to new admissions.
+3. Update the tables in [configuration.md](configuration.md),
+   [security.md](security.md) and [services.md](services.md#quota-manager).
+4. Add/adjust tests in `tier1_unit/test_quota_fail_closed.py`,
+   `tier1_unit/test_admin_quotas.py` and the tier-3 suites.
 
 ### Change the sandbox
 
@@ -94,7 +97,10 @@ cannot be installed and read back.
 
 - **Policy** → `packages/harness-integration/dsh-plugin-sysadmin/lib/policy.js`
   (keep it in lock-step with the Python filter).
-- **Audit** → `lib/audit.js` (same field set as `log_audit_event`).
+- **Audit** → `lib/audit.js` (same field set as `log_audit_event`). A new
+  emission path must be added to
+  [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md) and pinned by
+  `tier1_unit/test_audit_census.py`.
 - **Backend calls** → `lib/backend.js`.
 - **Profile/model route** → `profile/cordis.patch.yml`.
 - **Per-user isolation** → `gateway/instance-manager.js`.

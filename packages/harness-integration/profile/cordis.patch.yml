@@ -37,3 +37,16 @@
   config:
     host: !!js process.env.SYSADMIN_HARNESS_HOST ?? '127.0.0.1'
     port: !!js Number(process.env.SYSADMIN_HARNESS_PORT ?? '3080')
+
+# The gateway preserves the browser Host (for example 192.168.14.159:3085).
+# The harness Origin fence accepts loopback plus these authorities. A
+# port-less IP matches every port, which is required because the instance
+# port is not the gateway port.
+- id: connection
+  config:
+    trustedHosts: !!js String(process.env.SYSADMIN_TRUSTED_HOSTS ?? '').split(',').map((entry) => entry.trim()).filter(Boolean).concat((ctx.webRuntime && ctx.webRuntime.trustedHosts) || [])
+
+# The sysadmin client plugin occupies the brand slots. Leaving the official
+# DeepSeek mark registered would throw on the single-slot seats.
+- id: ui-brand-official
+  disabled: true

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -72,9 +73,13 @@ class ConfigDeployer:
         staged_content: str,
         proposed_hash: Optional[str] = None,
         base_hash: Optional[str] = None,
+        expected_target_exists: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Executes the staged configuration deployment pipeline.
+        expected_target_exists binds an approved creation/replacement to the
+        destination's existence at proposal time. A base_hash implies True;
+        the adapter explicitly passes False for an approved creation.
         Returns:
             Dict containing status ("succeeded" / "failed"), message, backup_path, rollback_performed.
         """
@@ -82,9 +87,6 @@ class ConfigDeployer:
         canonical_target = validate_target_config_path(target_path, allow_tmp=self.allow_tmp)
         target_dir = os.path.dirname(canonical_target)
         target_name = os.path.basename(canonical_target)
-
-        if not os.path.exists(target_dir):
-            os.makedirs(target_dir, exist_ok=True)
 
         # Phase 2: Staged Content SHA-256 Verification (Tamper Check)
         actual_proposed_hash = hashlib.sha256(staged_content.encode("utf-8")).hexdigest()
@@ -111,11 +113,24 @@ class ConfigDeployer:
 
         # Phase 4: Destination Conflict Detection
         target_exists = os.path.exists(canonical_target)
+        # A digest implies an existing target. The adapter also supplies False
+        # for an approved creation, so an intervening creation is a conflict.
+        if expected_target_exists is None and base_hash is not None:
+            expected_target_exists = True
+        if expected_target_exists is not None and target_exists != expected_target_exists:
+            return {
+                "success": False,
+                "status": "failed",
+                "message": "Conflict detected: Target destination existence changed since proposal.",
+                "rollback_performed": False,
+            }
         actual_base_hash = None
+        target_metadata = None
         if target_exists:
-            with open(canonical_target, "r", encoding="utf-8", errors="replace") as f:
+            with open(canonical_target, "rb") as f:
+                target_metadata = os.fstat(f.fileno())
                 dest_content = f.read()
-            actual_base_hash = hashlib.sha256(dest_content.encode("utf-8")).hexdigest()
+            actual_base_hash = hashlib.sha256(dest_content).hexdigest()
 
             if base_hash is not None and base_hash != actual_base_hash:
                 return {
@@ -139,9 +154,9 @@ class ConfigDeployer:
                 with open(backup_path, "a") as f:
                     os.fsync(f.fileno())
                 # Verify backup
-                with open(backup_path, "r", encoding="utf-8", errors="replace") as f:
+                with open(backup_path, "rb") as f:
                     backup_content = f.read()
-                backup_hash = hashlib.sha256(backup_content.encode("utf-8")).hexdigest()
+                backup_hash = hashlib.sha256(backup_content).hexdigest()
                 if backup_hash != actual_base_hash:
                     if os.path.exists(backup_path):
                         os.unlink(backup_path)
@@ -162,10 +177,18 @@ class ConfigDeployer:
         # Phase 6: Same-Filesystem Atomic Swap (os.replace)
         tmp_path = os.path.join(target_dir, f".{target_name}.tmp.{uuid.uuid4().hex}")
         try:
-            fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+            os.makedirs(target_dir, exist_ok=True)
+            fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with open(fd, "w", encoding="utf-8") as f:
                 f.write(staged_content)
                 f.flush()
+                if target_metadata is not None:
+                    replacement_metadata = os.fstat(f.fileno())
+                    if (replacement_metadata.st_uid, replacement_metadata.st_gid) != (
+                        target_metadata.st_uid, target_metadata.st_gid
+                    ):
+                        os.fchown(f.fileno(), target_metadata.st_uid, target_metadata.st_gid)
+                    os.fchmod(f.fileno(), stat.S_IMODE(target_metadata.st_mode))
                 os.fsync(f.fileno())
             os.replace(tmp_path, canonical_target)
         except Exception as e:
@@ -180,9 +203,10 @@ class ConfigDeployer:
 
         # Phase 7: Post-Deployment Verification
         try:
-            with open(canonical_target, "r", encoding="utf-8", errors="replace") as f:
-                deployed_content = f.read()
-            deployed_hash = hashlib.sha256(deployed_content.encode("utf-8")).hexdigest()
+            with open(canonical_target, "rb") as f:
+                deployed_bytes = f.read()
+            deployed_hash = hashlib.sha256(deployed_bytes).hexdigest()
+            deployed_content = deployed_bytes.decode("utf-8")
 
             if deployed_hash != actual_proposed_hash:
                 raise ValueError("Post-deployment content hash mismatch")

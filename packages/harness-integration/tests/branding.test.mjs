@@ -10,7 +10,9 @@ import { test } from 'node:test'
 import {
   BRAND_ICON,
   BRAND_TITLE,
+  SURFACE_GLOBAL,
   brandIndexHtml,
+  surfaceInjections,
 } from '../dsh-plugin-sysadmin/lib/branding.js'
 
 const SAMPLE = `<!doctype html>
@@ -70,6 +72,16 @@ test('brandIndexHtml leaves the rest of the document untouched', () => {
   assert.ok(out.includes('<!-- marker: untouched -->'))
   assert.ok(out.includes('<script src="/assets/index.js"></script>'))
   assert.ok(out.includes('<div id="app"></div>'))
+})
+
+test('surfaceInjections publishes the signed-in user and not a filesystem path', () => {
+  const [row] = surfaceInjections({ userId: 'sysadmin-01' })
+  assert.equal(row.kind, 'global')
+  assert.equal(row.name, SURFACE_GLOBAL)
+  assert.equal(row.value.user, 'sysadmin-01')
+  assert.equal(row.value.title, BRAND_TITLE)
+  assert.equal(row.value.icon, BRAND_ICON)
+  assert.equal(JSON.stringify(row).includes('/data/'), false)
 })
 
 test('BRAND_TITLE matches the title injected into the document', () => {

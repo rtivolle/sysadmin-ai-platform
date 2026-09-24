@@ -71,6 +71,10 @@ from the host after delivery.
 ./platform.sh chat             # interactive terminal assistant
 ```
 
+The hardware survey covers PCI accelerators and their kernel drivers, driver
+and toolkit availability, installed software versions, and model-store capacity
+and directory sizes in addition to host/GPU and sandbox readiness.
+
 `start` requires `master.key` and `valkey-password.key`; it injects
 `LITELLM_MASTER_KEY` and `VALKEY_URL` into the services and writes a rendered
 Valkey config with the password substituted into `backend/run/valkey.conf`.

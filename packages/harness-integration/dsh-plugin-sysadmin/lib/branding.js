@@ -10,6 +10,27 @@
 export const BRAND_TITLE = 'Mila — Sysadmin AI'
 /** Logo served by the gateway; the browser reaches it through the proxy. */
 export const BRAND_ICON = '/assets/mila-logo.png'
+/** Boot global the client plugin reads for the signed-in user. */
+export const SURFACE_GLOBAL = '__SYSADMIN_SURFACE__'
+
+/**
+ * Structured index rows: the signed-in user, for the in-app Mila chrome.
+ * No token and no filesystem path — the files panel asks the surface route.
+ *
+ * @param {{ userId: string }} surface
+ * @returns {Array<{ kind: 'global', name: string, value: { user: string, title: string, icon: string } }>}
+ */
+export function surfaceInjections({ userId }) {
+  return [{
+    kind: 'global',
+    name: SURFACE_GLOBAL,
+    value: {
+      user: String(userId || 'sysadmin'),
+      title: BRAND_TITLE,
+      icon: BRAND_ICON,
+    },
+  }]
+}
 
 /**
  * Retitle the document and point the favicon at the Mila asset.

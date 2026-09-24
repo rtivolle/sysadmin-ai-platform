@@ -352,10 +352,14 @@ Before/after on the same host:
 3. **Qualification scope.** The sign-off in section 9 covers the automated
    suites and the live smoke qualification described here. It is not a
    production acceptance certificate: the least-privilege privileged boundary,
-   a multi-worker Valkey integration run, a clean staging target deployment, a
-   real owner-scored 30-task evaluation, a kernel-backed sandbox stress run, an
-   event-by-event audit census, and a measured RTO/RPO drill remain open, as
-   stated in [`TEST_READY.md`](TEST_READY.md).
+   a multi-worker Valkey integration run, a clean staging target deployment, and
+   a real owner-scored 30-task evaluation remain open. The kernel-backed sandbox
+   stress run is done on the `systemd-run` leg (the raw cgroup-delegation leg is
+   verified fail-closed only); the restore drill is done at the file level with
+   measured copy timings (post-restore service bring-up outstanding); and the
+   event-by-event audit census is published in
+   [`AUDIT_CENSUS.md`](AUDIT_CENSUS.md) with five named gaps. See
+   [`TEST_READY.md`](TEST_READY.md) for current results and limits.
 4. **Residual measurements not re-taken.** The 54.9 MB peak-RSS figure and the
    RTO/RPO drill numbers in the body were not re-measured in this session; they
    are reported as the M4 worker recorded them.

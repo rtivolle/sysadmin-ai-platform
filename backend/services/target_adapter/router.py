@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from typing import Dict, Any
 
 from services.agent_runtime.workspace import ensure_workspace
+from services.agent_tools.audit import log_audit_event
 from services.auth_gateway.server import authenticate_request, role_for_user
 
 from .adapter import TargetAdapter, get_target_adapter
@@ -86,6 +87,20 @@ async def decide_approval(request: DecisionRequest, http_request: Request):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
 
     appr = res.get("approval", {})
+    log_audit_event(
+        user_id=reviewer,
+        session_id=appr.get("session_id", ""),
+        tool_name="approval_decision",
+        command=appr.get("command", ""),
+        human_approved=request.approved,
+        exit_code=0,
+        duration_ms=0,
+        extra={
+            "approval_decision": res.get("status", "approved" if request.approved else "rejected"),
+            "approval_id": request.approval_id,
+            "requester": appr.get("user_id"),
+        },
+    )
     return DecisionResponse(
         approval_id=request.approval_id,
         status=res.get("status", "approved" if request.approved else "rejected"),

@@ -51,6 +51,8 @@ packages/harness-integration/ DeepSeek Harness profile, plugin, multi-user gatew
 docs/                         documentation set (start at docs/README.md)
   specs/                      the six source specifications (French, .docx + .txt)
   plans/DEVELOPMENT_PLAN.md   implementation baseline and backlog
+  plans/PRODUCTION_READINESS.md  prioritized production-readiness work items and tracking
+  plans/MULTI_HOST_DEPLOYMENT.md  three-machine topology design (unimplemented; PR-H1)
   status/TEST_READY.md        current verification results and limits
   status/BENCHMARK_REPORT.md  M4 qualification report + re-verification addendum
 ```

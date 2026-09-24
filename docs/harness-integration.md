@@ -133,7 +133,7 @@ harness:
 | `SYSADMIN_INITIAL_PASSWORDS_FILE` | `<keys>/initial-passwords.txt` | Where rotated passwords land. |
 | `SYSADMIN_PROVISION_LOGINS` | `<keys>/provision-logins.py` | Rotation script used by the console. |
 | `SYSADMIN_PYTHON` | `backend/.venv/bin/python3` | Python for the rotation script. |
-| `SYSADMIN_PLATFORM_SH` | `./platform.sh` | Service-restart helper used by the console. |
+| `SYSADMIN_PLATFORM_SH` | `./platform.sh` | Service start/stop/restart helper used by the console. |
 | `SYSADMIN_TRAEFIK_PORT` | `8080` | Traefik probe port. |
 | `SYSADMIN_INFERENCE_PORT` | `8000` | Inference probe port. |
 | `SYSADMIN_SEAWEEDFS_PORT` | `8333` | SeaweedFS S3 port (status display). |
@@ -177,6 +177,17 @@ operator. Authorization stays local: the operator holds
 - The console never returns the master token or user keys; browser sessions are
   exposed only as 16-character SHA-256 handles of the cookie value.
 
+The UI is organised into tabs: **Vue d'ensemble**, **Utilisateurs & sessions**,
+**Quotas**, **Runtimes**, **Modèles disponibles**, **Modèles locaux**,
+**Approbations**, **Audit**, **Services** and **Matériel**. *Quotas* reads and
+writes the shared per-user limits through the auth gateway with the master
+bearer; *Runtimes* lists one row per provisioned user (running or stopped);
+*Modèles disponibles* shows the LiteLLM catalogue and flags whether inference is
+simulated or proxied; *Modèles locaux* registers, downloads and starts local
+HuggingFace models; *Matériel* renders the device/GPU/driver survey; *Services*
+offers start/stop/restart and refuses to manage the gateway itself (that stays a
+host operation).
+
 | Method | Path | Purpose | Backend call |
 |---|---|---|---|
 | GET | `/api/admin/session` | Unauthenticated login probe; reports gateway ports. | — |
@@ -190,11 +201,26 @@ operator. Authorization stays local: the operator holds
 | GET | `/api/admin/instances/{user}/logs?tail=` | Tail the user's log (`tail` 1 KiB–200 KiB, default 32 KiB). | — |
 | GET | `/api/admin/users` | Provisioned users, key presence, sessions, instance. | — |
 | POST | `/api/admin/users/{user}/rotate-password` | Rotate one login password; the response names `initial-passwords.txt` and never contains the value. | `provision-logins.py --user <user> --rotate` |
+| GET | `/api/admin/quotas` | Per-user quota snapshots and the accepted bounds. | `GET /api/v1/admin/quotas` |
+| POST | `/api/admin/quotas/{user}` | Body `{"limits":{...}}` replaces a user's overrides; `{"limits":{}}` restores defaults. An unconfirmed write is surfaced as `503`. | `POST /api/v1/admin/quotas/{user}` |
 | GET | `/api/admin/approvals` | Pending approvals. | `GET /api/approvals/pending` |
 | POST | `/api/admin/approvals/decide` | Approve or reject an approval. | `POST /api/approvals/decide` |
 | GET | `/api/admin/audit?query=&limit=` | Query the audit trail (LogsQL; `limit` ≤ 500, default 100). | VictoriaLogs `/select/logsql/query` |
+| GET | `/api/admin/models` | Model catalogue (ids and owners) plus the inference mode. Provider configuration and credentials are never returned. | LiteLLM `GET /models` + inference `GET /health` |
+| GET | `/api/admin/survey?refresh=0\|1` | Device/GPU/driver survey (cached 10 s; `refresh=1` re-runs). | agent platform `GET /api/v1/survey` |
+| GET/POST | `/api/admin/local-models` | List or register local models. | agent platform `/api/v1/models` |
+| POST | `/api/admin/local-models/{name}/{download\|start\|stop\|restart\|delete}` | Local model lifecycle; `delete` accepts `?delete_files=1`. | agent platform `/api/v1/models/...` |
+| GET | `/api/admin/local-models/{name}/logs?tail=` | Tail the model's vLLM log. | agent platform `/api/v1/models/{name}/logs` |
 | GET | `/api/admin/services` | Service list with ports and pid liveness. | — |
-| POST | `/api/admin/services/{name}/restart` | Restart one service, serialized, 30 s timeout. | `platform.sh service <name> restart` |
+| POST | `/api/admin/services/{name}/{start\|stop\|restart}` | Start, stop or restart one service, serialized per service, 30 s timeout. `harness_gateway` is refused with `409`. | `platform.sh service <name> <action>` |
+
+Quota changes apply to new requests without restarting services. The UI keeps
+unsaved quota edits during polling; saves are validated server-side and read
+back after writing. See [configuration.md](configuration.md#5-quota-defaults)
+for defaults, P1 precedence and the counters exposed. Model listing is a
+sanitized LiteLLM catalogue, not a model installation or GPU-load control.
+Service actions preserve the configured agent port through
+`SYSADMIN_AGENT_PORT`; managing the console's own process stays on the host.
 
 ## 2. Profile layer
 
@@ -256,16 +282,27 @@ approval-gated and audited there.
   shared stylesheet (accent `#003cc5`, slate `#353641`).
 - The gateway login page, the admin console and the favicon are Mila-branded and
   link back to <https://mila.quebec/>.
-- The harness surface itself is not forked.
-  `dsh-plugin-sysadmin/lib/branding.js` hooks the webserver's supported
-  `tapIndex` seam to set the title `Mila — Sysadmin AI` and the Mila favicon
-  (proxied through the gateway). Deeper in-app theming is not supported by the
-  harness seams.
+- The harness surface itself is not forked. The plugin uses the supported
+  seams: `tapIndex` sets the title `Mila — Sysadmin AI` and the Mila favicon,
+  `webserver/index-inject` publishes the signed-in user as
+  `window.__SYSADMIN_SURFACE__`, and the plugin's client bundle occupies
+  `sidebar.brand.mark`, `sidebar.brand.name` and `conversation.hero.brand.mark`
+  with the Mila logo. The official DeepSeek brand row is disabled so those
+  single slots stay free. The sidebar foot shows the signed-in user and a
+  files panel backed by `GET /api/sysadmin/surface`, which lists only that
+  user's workspace. The user's directory is also registered as a harness
+  workspace so the session list is not an empty picker.
+- The gateway proxies the browser's `Host` unchanged. Rewriting it to the
+  loopback instance port makes the harness Origin check return 403, which
+  leaves the UI stuck on the login wall even after a successful gateway
+  login. Each instance is told the host's non-internal IPv4 addresses (and
+  `SYSADMIN_TRUSTED_HOSTS`) so a browser on the gateway port is a trusted
+  authority.
 
 ## 5. Running and testing
 
-`platform.sh` starts the gateway, and the `service` subcommand restarts any
-individual service the admin console offers:
+`platform.sh` starts the gateway, and the `service` subcommand starts, stops or
+restarts any individual service the admin console offers:
 
 ```bash
 ./platform.sh harness                          # start the gateway on :3085

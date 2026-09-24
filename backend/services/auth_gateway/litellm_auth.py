@@ -61,6 +61,10 @@ async def sysadmin_custom_auth(request: Request, api_key: str) -> UserAPIKeyAuth
         )
 
     is_p1 = quota_mgr.is_p1_elevated(user_id)
+    try:
+        limits = quota_mgr.get_limits(user_id, is_p1)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Shared quota state unavailable") from exc
 
     # LiteLLM has already parsed the request body before invoking custom auth.
     # Reserve a conservative daily token estimate atomically before model work.
@@ -120,9 +124,9 @@ async def sysadmin_custom_auth(request: Request, api_key: str) -> UserAPIKeyAuth
     return UserAPIKeyAuth(
         api_key=clean_key or f"auth-{user_id}",
         user_id=user_id,
-        max_parallel_requests=6 if is_p1 else 2,
-        rpm_limit=200 if is_p1 else 60,
-        tpm_limit=500000 if is_p1 else 150000,
+        max_parallel_requests=limits["concurrency"],
+        rpm_limit=limits["rpm"],
+        tpm_limit=limits["tpm"],
         user_role="proxy_admin" if user_id == "sysadmin-admin" else "internal_user"
     )
 

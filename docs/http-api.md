@@ -65,6 +65,43 @@ Returns the caller's elevation status
 
 Revokes the caller's P1 elevation and every issued token.
 
+### `GET /api/v1/admin/quotas`
+
+Administrator only (`sysadmin-admin`; any other authenticated caller gets `403`,
+unauthenticated `401`). Returns the per-user quota snapshot and the accepted
+bounds:
+
+```json
+{
+  "users": [{
+    "user_id": "sysadmin-01",
+    "limits": {"concurrency": 2, "rpm": 60, "tpm": 150000, "daily_tokens": 2000000},
+    "p1_elevated": false,
+    "overrides": {},
+    "day": "2026-09-24",
+    "timezone": "UTC",
+    "usage": {"concurrency": 0, "daily_tokens": 0, "reserved_tokens": 0}
+  }],
+  "bounds": {"concurrency": [1, 10], "rpm": [1, 10000], "tpm": [1, 10000000], "daily_tokens": [1, 1000000000]}
+}
+```
+
+`503` when the shared quota store is unavailable (fail closed).
+
+### `POST /api/v1/admin/quotas/{user_id}`
+
+Administrator only. Body must be exactly `{"limits": {...}}` where `limits` is a
+subset of `concurrency`, `rpm`, `tpm`, `daily_tokens`; each value must be an
+integer inside its bound. `{"limits":{}}` restores the standard/P1 defaults.
+Returns `{"status":"updated","user_id":"sysadmin-01","overrides":{...}}`.
+
+- `400` invalid body or value (`rpm: 0`, `true`, non-integer, unknown field);
+- `404` unknown `user_id`;
+- `503` shared store unavailable (the write is not confirmed).
+
+A successful update is recorded as a `quota_update` audit event with the
+reviewer as `user_id` and `parameters.{user_id,limits}`.
+
 ### `GET /health`
 
 Service health.
@@ -76,6 +113,13 @@ Service health.
 ### `GET /health`
 
 Service health.
+
+### `GET /api/v1/survey`
+
+Administrator only: returns the read-only hardware survey as JSON; unauthenticated
+requests receive `401` and other authenticated users receive `403`. Results are
+cached for approximately 10 seconds. Add `?refresh=1` to bypass the cache and
+run a fresh survey.
 
 ### `GET /api/tools/list`
 
@@ -96,6 +140,11 @@ Body: `{"name": "<tool>", "parameters": {...}, "session_id": "..."}`.
   - executed → `200` with `exit_code`, `stdout`, `stderr`, `confined: true`.
 - Unknown tool → `404`.
 
+The success, blocked, approval-required, approval-denied and unknown-tool
+dispatch paths emit schema-conformant audit events. Authentication and early
+validation failures have separate coverage gaps. See
+[status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md).
+
 ### `GET /api/approvals/pending`
 
 Admin only. Returns `{"pending_approvals":[{approval_id,user_id,command,reason,...}]}`.
@@ -103,7 +152,8 @@ Admin only. Returns `{"pending_approvals":[{approval_id,user_id,command,reason,.
 ### `POST /api/approvals/decide`
 
 Admin only. Body: `{"approval_id":"...","approved":true|false}`. Returns the
-decided record; `400` if not decidable.
+decided record; `400` if not decidable. Both outcomes emit an
+`approval_decision` audit event naming the reviewer and the requester.
 
 ### Agent runtime — `/api/v1/agent` (alias `/agent`)
 
@@ -186,6 +236,28 @@ rollback flag). Claim failures return `403`.
 
 Returns the record for an admin or the owning user; others receive `404`.
 
+### Model manager (agent platform)
+
+Admin only (`403` for other authenticated users, `401` anonymous). Registers
+HuggingFace repos, downloads snapshots and controls a local vLLM server per
+model. Full lifecycle, flags and limitations are in
+[model-management.md](model-management.md).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/models` | List registered models with status/server info. |
+| GET | `/api/v1/models/{name}` | One model plus its download-job status. |
+| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, quantization?, max_model_len?, tensor_parallel_size?, gpu_memory_utilization?}` → `201`. |
+| POST | `/api/v1/models/{name}/download` | Start a background snapshot download → `202`. |
+| POST | `/api/v1/models/{name}/start` | Start the vLLM server → `202`. |
+| POST | `/api/v1/models/{name}/stop` | Stop the vLLM server (`409` while starting only if already running). |
+| POST | `/api/v1/models/{name}/restart` | Stop then start → `202`. |
+| GET | `/api/v1/models/{name}/logs?tail=` | Tail the vLLM log (`tail` clamped 1 KiB–256 KiB). |
+| DELETE | `/api/v1/models/{name}?delete_files=0\|1` | Unregister (optionally delete files); `409` while running. |
+
+`400` on invalid repo/name/revision or parameters, `404` unknown model, `409` on
+a conflicting lifecycle transition. Mutations emit `model_*` audit events.
+
 ---
 
 ## LiteLLM (:4000)
@@ -266,8 +338,15 @@ keys are never returned.
 | GET | `/api/admin/instances/{user}/logs?tail=` | Tail the user's log (`tail` 1 KiB–200 KiB, default 32 KiB). | — |
 | GET | `/api/admin/users` | Provisioned users, key presence, sessions, instance. | — |
 | POST | `/api/admin/users/{user}/rotate-password` | Rotate one login password; the response names `initial-passwords.txt` and never contains the value. | `provision-logins.py --user <user> --rotate` |
+| GET | `/api/admin/quotas` | Per-user quota snapshots and accepted bounds. | `GET /api/v1/admin/quotas` |
+| POST | `/api/admin/quotas/{user}` | Replace a user's limit overrides (`{}` restores defaults). | `POST /api/v1/admin/quotas/{user}` |
 | GET | `/api/admin/approvals` | Pending approvals. | `GET /api/approvals/pending` |
 | POST | `/api/admin/approvals/decide` | Approve or reject an approval. | `POST /api/approvals/decide` |
 | GET | `/api/admin/audit?query=&limit=` | Query the audit trail (LogsQL; `limit` ≤ 500, default 100). | VictoriaLogs `/select/logsql/query` |
+| GET | `/api/admin/models` | Model catalogue (ids and owners) plus the inference mode. Provider configuration and credentials are never returned. | LiteLLM `GET /models` + inference `GET /health` |
+| GET | `/api/admin/survey?refresh=0\|1` | Device/GPU/driver survey (cached 10 s; `refresh=1` re-runs the probes). | agent platform `GET /api/v1/survey` |
+| GET/POST | `/api/admin/local-models` | List or register local models. | agent platform `/api/v1/models` |
+| POST | `/api/admin/local-models/{name}/{download\|start\|stop\|restart\|delete}` | Local model lifecycle; `delete` accepts `?delete_files=1`. | agent platform `/api/v1/models/...` |
+| GET | `/api/admin/local-models/{name}/logs?tail=` | Tail the model's vLLM log. | agent platform `/api/v1/models/{name}/logs` |
 | GET | `/api/admin/services` | Service list with ports and pid liveness. | — |
-| POST | `/api/admin/services/{name}/restart` | Restart one service, serialized, 30 s timeout. | `platform.sh service <name> restart` |
+| POST | `/api/admin/services/{name}/{start\|stop\|restart}` | Start, stop or restart one service, serialized per service, 30 s timeout. `harness_gateway` (this console) is refused with `409`. | `platform.sh service <name> <action>` |

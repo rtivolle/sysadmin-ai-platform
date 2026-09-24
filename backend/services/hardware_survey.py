@@ -10,8 +10,163 @@ import json
 import shutil
 import platform
 import subprocess
+import re
+import importlib.metadata
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
+
+
+def query_pci_accelerators() -> List[Dict[str, Any]]:
+    """Return PCI display and processing accelerators discovered by lspci."""
+    lspci = shutil.which("lspci")
+    if not lspci:
+        return []
+    try:
+        proc = subprocess.run([lspci, "-nnk"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8)
+        if proc.returncode != 0:
+            return []
+        accelerators = []
+        eligible_codes = {"0300", "0302", "0380", "1200"}
+        eligible_text = ("vga compatible controller", "3d controller", "display controller", "processing accelerators")
+        for block in re.split(r"\n(?=[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])", proc.stdout.strip()):
+            lines = block.splitlines()
+            if not lines:
+                continue
+            header = re.match(r"^([0-9a-fA-F:.]+)\s+(.+)$", lines[0].strip())
+            if not header:
+                continue
+            slot, description = header.groups()
+            class_match = re.search(r"\[([0-9a-fA-F]{4})\]", description)
+            pci_class = class_match.group(1).lower() if class_match else None
+            if pci_class not in eligible_codes and not any(label in description.lower() for label in eligible_text):
+                continue
+            ids_match = re.search(r"\[([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\]", description)
+            driver_match = next((re.match(r"\s*Kernel driver in use:\s*(.+)", line) for line in lines[1:] if "Kernel driver in use:" in line), None)
+            modules_match = next((re.match(r"\s*Kernel modules:\s*(.*)", line) for line in lines[1:] if "Kernel modules:" in line), None)
+            accelerators.append({
+                "slot": slot,
+                "description": re.sub(r"\s+\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]", "", description).strip(),
+                "vendor_device_ids": ids_match.group(1).lower() if ids_match else None,
+                "pci_class": pci_class,
+                "kernel_driver": driver_match.group(1).strip() if driver_match else None,
+                "kernel_modules": [item.strip() for item in modules_match.group(1).split(",") if item.strip()] if modules_match else [],
+            })
+        return accelerators
+    except Exception:
+        return []
+
+
+def query_driver_stack() -> Dict[str, Any]:
+    """Collect optional accelerator kernel and toolkit driver details."""
+    def run_optional(command):
+        try:
+            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            return proc.stdout if proc.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    try:
+        with open("/proc/modules", "r", encoding="utf-8") as modules_file:
+            loaded = {line.split()[0] for line in modules_file if line.split()}
+    except Exception:
+        loaded = set()
+    module_names = ("nvidia", "nvidia_uvm", "nvidia_drm", "amdgpu", "radeon", "i915", "xe")
+
+    nvidia_smi = shutil.which("nvidia-smi")
+    nvcc = shutil.which("nvcc")
+    smi_version = None
+    cuda_runtime = None
+    if nvidia_smi:
+        version_output = run_optional([nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"])
+        smi_version = next((line.strip() for line in version_output.splitlines() if line.strip()), None)
+        plain_output = run_optional([nvidia_smi])
+        cuda_match = re.search(r"CUDA Version:\s*([\w.]+)", plain_output)
+        cuda_runtime = cuda_match.group(1) if cuda_match else None
+
+    proc_version = None
+    try:
+        with open("/proc/driver/nvidia/version", "r", encoding="utf-8") as version_file:
+            proc_version = next((line.strip() for line in version_file if line.strip()), None)
+    except Exception:
+        pass
+
+    cuda_toolkit = None
+    if nvcc:
+        nvcc_output = run_optional([nvcc, "--version"])
+        toolkit_match = re.search(r"release\s+([\d.]+)", nvcc_output, re.IGNORECASE)
+        cuda_toolkit = toolkit_match.group(1) if toolkit_match else None
+    if cuda_toolkit is None:
+        try:
+            with open("/usr/local/cuda/version.json", "r", encoding="utf-8") as version_file:
+                version_data = json.load(version_file)
+            cuda_toolkit = version_data.get("cuda", {}).get("version") or version_data.get("version")
+        except Exception:
+            pass
+
+    def optional_version(tool):
+        path = shutil.which(tool)
+        if not path:
+            return {"present": False, "version": None}
+        output = run_optional([path, "--version"])
+        return {"present": True, "version": next((line.strip() for line in output.splitlines() if line.strip()), None)}
+
+    try:
+        drm_entries = os.listdir("/sys/class/drm")
+    except Exception:
+        drm_entries = []
+    intel_render_nodes = sorted(name for name in drm_entries if "renderD" in name)
+    intel_cards = sorted(name for name in drm_entries if re.fullmatch(r"card\d+", name))
+
+    return {
+        "kernel_release": platform.release(),
+        "loaded_modules": [name for name in module_names if name in loaded],
+        "nvidia": {"present": bool(nvidia_smi), "smi_driver_version": smi_version, "proc_version": proc_version,
+                   "cuda_toolkit": cuda_toolkit, "cuda_runtime": cuda_runtime},
+        "amd": {"rocminfo": optional_version("rocminfo"), "rocm_smi": optional_version("rocm-smi")},
+        "intel": {"render_nodes": intel_render_nodes, "card_count": len(intel_cards)},
+    }
+
+
+def query_software_versions() -> Dict[str, Any]:
+    """Read package metadata without importing optional ML packages."""
+    versions = {"python": platform.python_version()}
+    for package in ("torch", "vllm", "huggingface_hub", "litellm"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except Exception:
+            versions[package] = None
+    return versions
+
+
+def query_model_storage(models_dir: str) -> Dict[str, Any]:
+    """Summarize capacity and direct model-directory sizes, tolerating I/O errors."""
+    result = {"path": os.path.abspath(models_dir), "exists": False, "total_bytes": None, "free_bytes": None, "entries": []}
+    try:
+        result["exists"] = os.path.isdir(models_dir)
+        stat = os.statvfs(models_dir if result["exists"] else os.path.dirname(os.path.abspath(models_dir)) or ".")
+        result["total_bytes"] = stat.f_blocks * stat.f_frsize
+        result["free_bytes"] = stat.f_bavail * stat.f_frsize
+    except Exception:
+        pass
+    if not result["exists"]:
+        return result
+    try:
+        for entry in os.scandir(models_dir):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            size = 0
+            for root, dirs, files in os.walk(entry.path, followlinks=False):
+                dirs[:] = [name for name in dirs if not os.path.islink(os.path.join(root, name))]
+                for name in files:
+                    try:
+                        size += os.stat(os.path.join(root, name), follow_symlinks=False).st_size
+                    except Exception:
+                        pass
+            result["entries"].append({"name": entry.name, "size_bytes": size})
+        result["entries"].sort(key=lambda item: item["name"])
+    except Exception:
+        pass
+    return result
 
 def query_nvidia_smi() -> List[Dict[str, Any]]:
     """Query nvidia-smi for all installed GPUs."""
@@ -296,6 +451,11 @@ def run_hardware_survey() -> Dict[str, Any]:
     sandbox = query_sandbox_readiness()
     storage = query_storage_mounts()
     recommendation = calculate_inference_recommendation(gpus, ram)
+    pci_accelerators = query_pci_accelerators()
+    driver_stack = query_driver_stack()
+    software_versions = query_software_versions()
+    models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data/models"))
+    model_storage = query_model_storage(models_dir)
 
     return {
         "survey_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -314,6 +474,10 @@ def run_hardware_survey() -> Dict[str, Any]:
         "cgroups_v2": cgroups,
         "sandbox_confinement": sandbox,
         "storage": storage,
+        "pci_accelerators": pci_accelerators,
+        "driver_stack": driver_stack,
+        "software_versions": software_versions,
+        "model_storage": model_storage,
         "inference_recommendation": recommendation
     }
 
@@ -339,6 +503,16 @@ def export_survey_reports(survey: Dict[str, Any], output_dir: str):
     mount_lines = []
     for m in survey["storage"]:
         mount_lines.append(f"| `{m['mountpoint']}` | {m['type']} | {m['total']} | {m['used']} | {m['available']} ({m['use_pct']}) |")
+
+    pci_lines = [f"| `{device.get('slot')}` | {device.get('description')} | {device.get('vendor_device_ids')} | {device.get('pci_class')} | {device.get('kernel_driver')} | {', '.join(device.get('kernel_modules', []))} |" for device in survey.get("pci_accelerators", [])]
+    if not pci_lines:
+        pci_lines = ["*No PCI accelerators detected.*"]
+    driver_stack = survey.get("driver_stack", {})
+    software_versions = survey.get("software_versions", {})
+    model_storage = survey.get("model_storage", {})
+    model_lines = [f"| `{entry.get('name')}` | {entry.get('size_bytes')} |" for entry in model_storage.get("entries", [])]
+    if not model_lines:
+        model_lines = ["*No model directories found.*"]
 
     md_content = f"""# Sysadmin AI Platform — Hardware & Device Survey Report
 **Timestamp:** {survey['survey_timestamp']}  
@@ -381,6 +555,39 @@ def export_survey_reports(survey: Dict[str, Any], output_dir: str):
 | Mountpoint | Filesystem | Total Size | Used | Available |
 |---|---|---|---|---|
 {chr(10).join(mount_lines)}
+
+---
+
+## 5. PCI Accelerators & Devices
+| Slot | Description | Vendor:Device IDs | PCI Class | Kernel Driver | Kernel Modules |
+|---|---|---|---|---|---|
+{chr(10).join(pci_lines)}
+
+---
+
+## 6. Driver & Toolkit Stack
+```json
+{json.dumps(driver_stack, indent=2)}
+```
+
+---
+
+## 7. Software Versions
+```json
+{json.dumps(software_versions, indent=2)}
+```
+
+---
+
+## 8. Model Storage
+* **Path:** `{model_storage.get('path')}`
+* **Exists:** {model_storage.get('exists')}
+* **Total bytes:** {model_storage.get('total_bytes')}
+* **Free bytes:** {model_storage.get('free_bytes')}
+
+| Model directory | Size (bytes) |
+|---|---:|
+{chr(10).join(model_lines)}
 
 ---
 *Report automatically generated by `hardware_survey.py`.*

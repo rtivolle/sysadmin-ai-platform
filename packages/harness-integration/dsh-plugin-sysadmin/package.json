@@ -9,7 +9,8 @@
     ".": "./index.js",
     "./policy": "./lib/policy.js",
     "./audit": "./lib/audit.js",
-    "./backend": "./lib/backend.js"
+    "./backend": "./lib/backend.js",
+    "./client": "./lib/client.js"
   },
   "files": [
     "index.js",
@@ -19,6 +20,16 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-theme"
+      ],
+      "platform": "web",
+      "immediately": true
     }
   },
   "peerDependencies": {

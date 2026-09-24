@@ -154,6 +154,56 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
       return true
     }
 
+    if (req.method === 'GET' && pathname === '/api/admin/quotas') {
+      await proxyQuotas(req, res)
+      return true
+    }
+
+    const quotaUser = pathname.match(/^\/api\/admin\/quotas\/([A-Za-z0-9._-]+)$/)
+    if (req.method === 'POST' && quotaUser) {
+      await proxyQuotas(req, res, quotaUser[1])
+      return true
+    }
+
+    if (req.method === 'GET' && pathname === '/api/admin/models') {
+      await listModels(res)
+      return true
+    }
+
+    if (req.method === 'GET' && pathname === '/api/admin/survey') {
+      await proxySurvey(res, url)
+      return true
+    }
+
+    if (req.method === 'GET' && pathname === '/api/admin/local-models') {
+      await proxyLocalModels(req, res, '/api/v1/models', 'GET')
+      return true
+    }
+
+    if (req.method === 'POST' && pathname === '/api/admin/local-models') {
+      await proxyLocalModels(req, res, '/api/v1/models', 'POST')
+      return true
+    }
+
+    match = pathname.match(/^\/api\/admin\/local-models\/([A-Za-z0-9._-]+)\/(download|start|stop|restart|delete)$/)
+    if (req.method === 'POST' && match) {
+      const [, name, action] = match
+      const query = action === 'delete' && url.searchParams.get('delete_files') === '1' ? '?delete_files=1' : ''
+      const agentPath = action === 'delete'
+        ? `/api/v1/models/${encodeURIComponent(name)}${query}`
+        : `/api/v1/models/${encodeURIComponent(name)}/${action}`
+      await proxyLocalModels(req, res, agentPath, action === 'delete' ? 'DELETE' : 'POST')
+      return true
+    }
+
+    match = pathname.match(/^\/api\/admin\/local-models\/([A-Za-z0-9._-]+)\/logs$/)
+    if (req.method === 'GET' && match) {
+      const tail = url.searchParams.get('tail')
+      const suffix = tail ? `?tail=${encodeURIComponent(tail)}` : ''
+      await proxyLocalModels(req, res, `/api/v1/models/${encodeURIComponent(match[1])}/logs${suffix}`, 'GET')
+      return true
+    }
+
     match = pathname.match(/^\/api\/admin\/instances\/([A-Za-z0-9._-]+)\/logs$/)
     if (req.method === 'GET' && match) {
       handleInstanceLogs(res, url, match[1])
@@ -197,9 +247,9 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
       return true
     }
 
-    match = pathname.match(/^\/api\/admin\/services\/([A-Za-z0-9._-]+)\/restart$/)
+    match = pathname.match(/^\/api\/admin\/services\/([A-Za-z0-9._-]+)\/(start|stop|restart)$/)
     if (req.method === 'POST' && match) {
-      await handleServiceRestart(req, res, match[1])
+      await handleServiceAction(req, res, match[1], match[2])
       return true
     }
 
@@ -630,6 +680,103 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
 
   // ── Audit ─────────────────────────────────────────────────────────────────
 
+  async function proxyQuotas(req, res, userId) {
+    const token = masterToken()
+    if (!token) return sendJson(res, 503, { detail: 'master key file unavailable' })
+    const body = userId ? await readJsonBody(req, res) : undefined
+    if (userId && body === undefined) return
+    try {
+      const response = await fetch(`${config.authUrl}/api/v1/admin/quotas${userId ? `/${encodeURIComponent(userId)}` : ''}`, {
+        method: userId ? 'POST' : 'GET',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: userId ? JSON.stringify(body) : undefined,
+        redirect: 'error',
+        signal: AbortSignal.timeout(BACKEND_TIMEOUT_MS),
+      })
+      const result = await response.json()
+      return sendJson(res, response.status, result)
+    } catch {
+      return sendJson(res, 503, { detail: 'Quota service unavailable; limits were not confirmed. Refresh before retrying.' })
+    }
+  }
+
+  async function listModels(res) {
+    const token = masterToken()
+    if (!token) return sendJson(res, 503, { detail: 'master key file unavailable' })
+    try {
+      const response = await fetch(`${config.litellmUrl.replace(/\/+$/, '')}/models`, {
+        headers: { authorization: `Bearer ${token}` }, redirect: 'error',
+        signal: AbortSignal.timeout(BACKEND_TIMEOUT_MS),
+      })
+      if (!response.ok) return sendJson(res, 503, { detail: `LiteLLM model catalog unavailable (HTTP ${response.status})` })
+      const body = await response.json()
+      if (!Array.isArray(body.data)) throw new Error('Invalid model catalog')
+      let inferenceMode = 'unknown'
+      try {
+        const health = await fetch(`http://127.0.0.1:${config.services.inference.port}/health`, {
+          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), redirect: 'error',
+        })
+        if (health.ok) {
+          const status = await health.json()
+          if (status.upstream_vllm === 'local-simulated') inferenceMode = 'simulated'
+          else if (typeof status.upstream_vllm === 'string' && status.upstream_vllm) inferenceMode = 'vllm-proxy'
+        }
+      } catch { /* Catalog remains usable if the inference health probe fails. */ }
+      // Never proxy provider configuration or credentials into the browser.
+      const models = body.data.filter((model) => typeof model?.id === 'string').map((model) => ({
+        id: model.id, owned_by: typeof model.owned_by === 'string' ? model.owned_by : '',
+      }))
+      return sendJson(res, 200, { models, inferenceMode, source: 'LiteLLM /models' })
+    } catch {
+      return sendJson(res, 503, { detail: 'LiteLLM model catalog unreachable' })
+    }
+  }
+
+  async function proxySurvey(res, url) {
+    const token = masterToken()
+    if (!token) return sendJson(res, 503, { detail: 'master key file unavailable' })
+    const refresh = url.searchParams.get('refresh') === '1' ? '?refresh=1' : ''
+    try {
+      const response = await fetch(`${config.agentUrl}/api/v1/survey${refresh}`, {
+        headers: { authorization: `Bearer ${token}` }, redirect: 'error',
+        signal: AbortSignal.timeout(SERVICE_RESTART_TIMEOUT_MS),
+      })
+      const text = await response.text()
+      let result
+      try { result = text ? JSON.parse(text) : {} } catch { result = { detail: tail(text, 500) } }
+      return sendJson(res, response.status, result)
+    } catch {
+      return sendJson(res, 503, { detail: 'Hardware survey unavailable' })
+    }
+  }
+
+  async function proxyLocalModels(req, res, agentPath, method) {
+    const token = masterToken()
+    if (!token) return sendJson(res, 503, { detail: 'master key file unavailable' })
+    const needsBody = method === 'POST' && agentPath === '/api/v1/models'
+    let body
+    if (needsBody) {
+      body = await readJsonBody(req, res)
+      if (body === undefined) return
+    }
+    try {
+      const response = await fetch(`${config.agentUrl}${agentPath}`, {
+        method,
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: needsBody ? JSON.stringify(body) : undefined,
+        redirect: 'error',
+        // stop() waits for vLLM to exit; allow the 30 s supervision budget.
+        signal: AbortSignal.timeout(SERVICE_RESTART_TIMEOUT_MS),
+      })
+      const text = await response.text()
+      let result
+      try { result = text ? JSON.parse(text) : {} } catch { result = { detail: tail(text, 500) } }
+      return sendJson(res, response.status, result)
+    } catch {
+      return sendJson(res, 503, { detail: 'Agent platform model API unreachable' })
+    }
+  }
+
   async function handleAudit(res, url) {
     const query = (url.searchParams.get('query') ?? '*').trim() || '*'
     const requested = Number.parseInt(url.searchParams.get('limit') ?? '', 10)
@@ -699,9 +846,12 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
     }
   }
 
-  async function handleServiceRestart(req, res, name) {
+  async function handleServiceAction(req, res, name, action) {
     if (!Object.hasOwn(config.services, name)) {
       return sendJson(res, 404, { detail: `unknown service ${name}` })
+    }
+    if (name === 'harness_gateway') {
+      return sendJson(res, 409, { detail: 'Manage the admin gateway itself from platform.sh on the host' })
     }
     if (!existsSync(config.platformSh)) {
       return sendJson(res, 501, { detail: `platform.sh not found: ${config.platformSh}` })
@@ -715,15 +865,16 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
       }
     }
     return withLock(`service:${name}`, async () => {
-      const result = await runCommand(config.platformSh, ['service', name, 'restart'], {
+      const result = await runCommand(config.platformSh, ['service', name, action], {
         cwd: config.backendRoot,
         timeoutMs: SERVICE_RESTART_TIMEOUT_MS,
+        env: { ...process.env, SYSADMIN_AGENT_PORT: String(config.services.agent_tools.port) },
       })
       const output = tail(result.output, 4000)
       const status = result.exitCode === 0 ? 200 : 500
-      log(`admin restarted service ${name} (exit=${result.exitCode})`)
+      log(`admin ${action} service ${name} (exit=${result.exitCode})`)
       return sendJson(res, status, {
-        status: result.exitCode === 0 ? 'restarted' : 'failed',
+        status: result.exitCode === 0 ? { start: 'started', stop: 'stopped', restart: 'restarted' }[action] : 'failed',
         service: name,
         exitCode: result.exitCode,
         timedOut: result.timedOut,
@@ -765,15 +916,15 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
    *
    * @param {string} command
    * @param {string[]} args
-   * @param {{ cwd?: string, timeoutMs: number }} options
+   * @param {{ cwd?: string, timeoutMs: number, env?: NodeJS.ProcessEnv }} options
    * @returns {Promise<{ exitCode: number, output: string, timedOut: boolean }>}
    */
-  function runCommand(command, args, { cwd, timeoutMs }) {
+  function runCommand(command, args, { cwd, timeoutMs, env }) {
     return new Promise((resolve) => {
       let output = ''
       let settled = false
       let timedOut = false
-      const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
       const timer = setTimeout(() => {
         timedOut = true
         child.kill('SIGKILL')

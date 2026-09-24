@@ -8,6 +8,7 @@ import time
 import json
 import asyncio
 from fastapi import FastAPI, Request, HTTPException
+from fastapi import Query
 from fastapi.responses import JSONResponse
 import httpx
 import uvicorn
@@ -24,8 +25,10 @@ from services.agent_tools.approval_gate import evaluate_command_safety, create_a
 from services.agent_tools.audit import log_audit_event
 from services.agent_runtime.router import router as agent_router
 from services.target_adapter.router import router as target_adapter_router
+from services.model_manager.router import router as model_manager_router
 from services.agent_runtime.workspace import ensure_workspace
 from services.auth_gateway.server import authenticate_request, role_for_user
+from services.hardware_survey import run_hardware_survey
 
 app = FastAPI(title="Sysadmin Agent Platform API", version="1.0.0")
 
@@ -38,12 +41,29 @@ app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Runtime"])
 app.include_router(agent_router, prefix="/agent", tags=["Agent Runtime Alias"])
 # Mount target adapter router
 app.include_router(target_adapter_router)
+# Mount local model lifecycle router (admin-only)
+app.include_router(model_manager_router)
 
 LITELLM_URL = os.getenv("LITELLM_URL", "http://127.0.0.1:4000")
+_survey_cache = None
+_survey_cache_timestamp = 0.0
 
 @app.get("/health")
 async def health():
     return {"status": "healthy", "service": "agent_tools_platform", "timestamp": time.time()}
+
+
+@app.get("/api/v1/survey")
+async def hardware_survey(request: Request, refresh: int = Query(default=0)):
+    """Return a read-only hardware survey to administrators."""
+    require_approval_reviewer(request)
+    global _survey_cache, _survey_cache_timestamp
+    now = time.monotonic()
+    if refresh != 1 and _survey_cache is not None and now - _survey_cache_timestamp < 10:
+        return _survey_cache
+    _survey_cache = run_hardware_survey()
+    _survey_cache_timestamp = now
+    return _survey_cache
 
 @app.get("/api/tools/list")
 async def list_tools(request: Request):
@@ -132,8 +152,12 @@ async def execute_tool(request: Request):
         if safety["action"] == "APPROVAL_REQUIRED":
             if not consume_approval(approval_id, user_id, session_id, cmd, workspace):
                 if approval_id:
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    log_audit_event(user_id, session_id, tool_name, cmd, False, 126, duration_ms, action=tool_name, parameters=params, approval_id=approval_id, extra={"approval_denied": True, "reason": "Approval invalid, expired, mismatched, or already used"})
                     raise HTTPException(status_code=403, detail="Approval invalid, expired, mismatched, or already used")
                 new_appr_id = create_approval_request(user_id, session_id, cmd, safety["reason"], workspace)
+                duration_ms = int((time.time() - start_time) * 1000)
+                log_audit_event(user_id, session_id, tool_name, cmd, False, 0, duration_ms, action=tool_name, parameters=params, approval_id=new_appr_id, extra={"approval_required": True, "approval_id": new_appr_id})
                 return JSONResponse(
                     status_code=202,
                     content={
@@ -154,6 +178,19 @@ async def execute_tool(request: Request):
         }
 
     else:
+        duration_ms = int((time.time() - start_time) * 1000)
+        log_audit_event(
+            user_id=user_id,
+            session_id=session_id,
+            tool_name=tool_name or "unknown",
+            action=tool_name or "unknown",
+            parameters=params,
+            command=params.get("command"),
+            human_approved=False,
+            exit_code=127,
+            duration_ms=duration_ms,
+            extra={"unknown_tool": True},
+        )
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
 
     duration_ms = int((time.time() - start_time) * 1000)

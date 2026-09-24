@@ -31,6 +31,7 @@ import {
 } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
+import { trustedHostList } from './config.js'
 import { readJsonFile, removeFile, writeFileAtomic } from './state-file.js'
 
 const LAUNCH_TOKEN_PATTERN = /https?:\/\/[^\s"'<>]*[?&]token=([A-Za-z0-9._~-]+)/
@@ -536,6 +537,7 @@ export class InstanceManager {
   async #spawnInto(instance) {
     const { config } = this
     const token = readUserToken(config.keysDir, instance.userId)
+    const trustedHosts = trustedHostList(process.env)
     const env = {
       ...process.env,
       DSH_HOME: instance.home,
@@ -550,7 +552,12 @@ export class InstanceManager {
       SYSADMIN_AUDIT_OUTBOX: instance.outboxPath,
       SYSADMIN_HARNESS_HOST: config.instanceHost,
       SYSADMIN_HARNESS_PORT: String(instance.port),
+      // Port-less LAN addresses plus SYSADMIN_TRUSTED_HOSTS. The profile
+      // hands these to the harness Origin fence so a browser on the gateway
+      // port is not treated as a cross-origin stranger.
+      SYSADMIN_TRUSTED_HOSTS: trustedHosts.join(','),
     }
+    this.log(`harness for ${instance.userId} trusts ${trustedHosts.length > 0 ? trustedHosts.join(',') : 'loopback only'}`)
     const child = spawn(
       config.dshBin,
       ['--profile', config.profileName, '--no-open', '--port', String(instance.port)],

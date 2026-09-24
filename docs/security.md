@@ -42,7 +42,7 @@ access cannot impersonate an administrator by setting a header.
 
 | Role | Assigned to | Capabilities |
 |---|---|---|
-| `admin` | `sysadmin-admin` (master key) | List/decide approvals, any status query, LiteLLM proxy-admin. |
+| `admin` | `sysadmin-admin` (master key) | List/decide approvals, any status query, manage per-user quotas, LiteLLM proxy-admin. |
 | `p1-operator` | a user with active P1 elevation | Elevated quotas; still bound by sandbox, approval and audit. |
 | `sysadmin` | `sysadmin-01`…`10`, `emergency-p1-oncall` | Tools, chat, own sessions/approvals. |
 
@@ -142,6 +142,15 @@ as untrusted data.
   opened with `O_NOFOLLOW`, capped at 1 MiB.
 - Deployment verifies the proposed hash, detects out-of-band base-hash changes,
   backs up before replacing, verifies after replacing and rolls back on failure.
+- Destination hashes use exact file bytes. At execution-time validation, the
+  adapter rejects targets created or deleted since proposal as well as changed
+  content (including line-ending-only changes). Invalid proposed content is
+  rejected before creating destination directories.
+- Replacement files retain the existing target's Unix permission bits and
+  UID/GID; failure to apply those attributes aborts before replacement. New
+  configurations are created with mode `0600` (service-specific access must be
+  provisioned separately). ACL/extended-attribute preservation and concurrent
+  external writes between validation and replacement are not qualified.
 - Reviewer authority and executor identity are derived from authenticated
   identity; a caller cannot act as another user.
 
@@ -160,6 +169,12 @@ as untrusted data.
   `event_id` supports deduplication.
 - Malformed outbox records are quarantined so they cannot halt replay.
 - Audit failure is recorded but does not block a tool turn in the harness.
+- Every tool-call outcome, approval decision, target-adapter proposal and
+  execution (including failures and denied claims) and administrator quota
+  change emits an event. The complete path list is maintained in
+  [`status/AUDIT_CENSUS.md`](status/AUDIT_CENSUS.md), which also names the paths
+  that are still unaudited (runtime chat turns, LiteLLM failures, quota
+  denials, auth-gateway login/logout/`401`s and cancellation).
 
 > **Retention/integrity.** VictoriaLogs is configured with a 90-day retention
 > period. That is a storage setting, not proof of immutability or tamper
@@ -179,7 +194,8 @@ as untrusted data.
 | Quota bypass | Independent LiteLLM + auth-gateway enforcement, fail closed | Implemented; lease runtime verification pending |
 | Replay of an approval | Status CAS, single-use consumption | Implemented and tested |
 | Prompt injection authorising an action | Actions require out-of-band approval; content treated as data | Design property; adversarial evaluation pending |
-| Silent audit loss | Durable outbox, replay worker, `event_id` | Implemented; query-completeness check pending |
+| Silent audit loss | Durable outbox, replay worker, `event_id` | Implemented; per-path completeness is enumerated in [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md) with named open gaps |
+| Malicious model weights / untrusted repo | Admin-only register/download/start; `hf_repo` + `revision` recorded; download does not execute the model | Implemented; the vLLM execution path is unqualified (see §9) |
 
 ## 9. Known gaps
 
@@ -196,12 +212,27 @@ the code, and must be closed before any production target change:
    cgroups v2 and unprivileged namespaces; they skip where those are missing and
    pass on the current development host.
 5. Real owner-scored 30-task model evaluation not performed.
-6. Kernel-backed sandbox stress run not performed.
-7. Audit query completeness and full restore drill against clean staging remain.
-8. Measured RTO under four hours not established (the drill checks logic).
+6. Kernel-backed sandbox stress run: the `systemd-run` leg is qualified (real
+   OOM kill at the 4 GiB ceiling with `memory.swap.max=0`, 128-task ceiling,
+   2-CPU throttle, 15 s deadline, network denial, filesystem confinement); the
+   raw cgroup-delegation leg is verified fail-closed only and still needs a run
+   under the platform account's delegated subtree.
+7. Audit completeness is enumerated per path in
+   [`status/AUDIT_CENSUS.md`](status/AUDIT_CENSUS.md). The paths it lists as open
+   gaps (runtime chat turns, LiteLLM call failures, quota denials, auth-gateway
+   login/logout/`401`s, cancellation) still emit no event, and query
+   completeness against a live VictoriaLogs store is not proven.
+8. End-to-end RTO under four hours is supported, not measured: the file-copy
+   restore phase is measured on real host state (2026-09-24), but service
+   bring-up from restored state and a production-sized data set are outstanding.
 9. The login cookie is issued with `secure=False` for the loopback HTTP
    prototype; enable TLS and mark it secure before exposing the portal.
 10. Traefik CORS uses a wildcard origin list (`*`); restrict it to known portals
     before production.
 11. Retention is a VictoriaLogs setting and does not by itself provide
     tamper-evident archival.
+12. Local model serving is unqualified: no live vLLM start or HuggingFace
+    download has been run here, there is no GPU-fit guarantee for a chosen
+    model/context on the target card, and there is no per-model GPU isolation.
+    Registration/download/start are admin-only and path-confined. See
+    [model-management.md](model-management.md).

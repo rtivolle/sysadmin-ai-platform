@@ -138,6 +138,44 @@ def role_for_user(user_id: str) -> str:
 async def health():
     return {"status": "healthy", "service": "auth_gateway", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
+
+def require_quota_admin(request: Request) -> str:
+    user_id, _ = authenticate_request(request)
+    if user_id != "sysadmin-admin":
+        raise HTTPException(status_code=403, detail="Administrator required")
+    return user_id
+
+
+@app.get("/api/v1/admin/quotas")
+def admin_quotas(request: Request):
+    require_quota_admin(request)
+    try:
+        return {"users": [quota_mgr.quota_snapshot(user) for user in sorted(VALID_USERS)],
+                "bounds": QuotaManager.LIMIT_BOUNDS}
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Shared quota state unavailable") from exc
+
+
+@app.post("/api/v1/admin/quotas/{user_id}")
+async def admin_set_quota(user_id: str, request: Request):
+    reviewer = require_quota_admin(request)
+    if user_id not in VALID_USERS:
+        raise HTTPException(status_code=404, detail="Unknown quota user")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict) or set(body) != {"limits"}:
+            raise ValueError("limits object is required; use {} to restore defaults")
+        quota_mgr.set_limits(user_id, body["limits"])
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Shared quota state unavailable") from exc
+    from services.agent_tools.audit import log_audit_event
+    log_audit_event(user_id=reviewer, session_id="", tool_name="quota_update",
+                    action="quota_update", parameters={"user_id": user_id, "limits": body["limits"]},
+                    exit_code=0, duration_ms=0)
+    return {"status": "updated", "user_id": user_id, "overrides": body["limits"]}
+
 @app.get("/verify")
 @app.post("/verify")
 @app.get("/api/v1/auth/verify")

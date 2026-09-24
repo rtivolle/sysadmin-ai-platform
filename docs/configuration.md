@@ -43,7 +43,16 @@ before exposing it beyond the host.
 | `VALKEY_URL` | platform-injected | quota, approvals, sessions | Redis/Valkey URL. Setting it enables fail-closed mode. |
 | `VALKEY_HOST` / `VALKEY_PORT` / `VALKEY_PASSWORD` | `127.0.0.1` / `6379` / placeholder | auth gateway | Cookie-session store. |
 | `VICTORIALOGS_URL` | `http://127.0.0.1:9428` | audit, backup | Audit ingest/query. |
-| `UPSTREAM_VLLM_URL` | empty | inference | When set, proxy completions to vLLM. |
+| `UPSTREAM_VLLM_URL` | empty | inference | When set, proxy completions to a remote vLLM. |
+| `MODELS_DIR` | `backend/data/models` | model manager | Local model store (Git-ignored). |
+| `MODELS_REGISTRY` | `$MODELS_DIR/registry.json` | model manager | Registry file (0600, atomic). |
+| `HF_TOKEN` / `HF_TOKEN_FILE` | empty / `config/keys/hf-token.key` | downloader | HuggingFace token for gated repos. |
+| `HF_ENDPOINT` / `HF_HOME` / `HF_HUB_OFFLINE` | library defaults | downloader | Mirror, cache and offline mode (read by `huggingface_hub`). |
+| `VLLM_BIN` | `vllm` on `PATH` | model manager | vLLM executable. |
+| `MODEL_PORT_START` / `MODEL_PORT_END` | `8100` / `8199` | model manager | Per-model vLLM port range. |
+| `MODEL_LOG_DIR` | `backend/logs/models` | model manager | vLLM log directory. |
+| `LITELLM_CONFIG` | `config/litellm/config.yaml` | model manager | Config the managed `model_list` block is written to. |
+| `MODEL_INFERENCE_API_BASE` | `http://127.0.0.1:8000/v1` | model manager | `api_base` for generated LiteLLM entries. |
 | `QUOTA_TIMEZONE` | `UTC` | quota | Timezone for the daily rollover. |
 | `ENFORCE_CLUSTER_CONCURRENCY` | `0` | quota | Enforce the 8/10-slot cluster ceiling. |
 | `SESSION_TTL_SECONDS` | `86400` | session store | Session lifetime. |
@@ -96,6 +105,19 @@ defaults live in code:
 | Approval TTL | 300 s | 300 s |
 | Sandbox memory / pids / CPU | 4 GiB / 128 / 200 % | same |
 | Sandbox deadline | 15 s (+5 s kill grace) | same |
+
+The admin console's **Quotas** tab can override concurrency, RPM, TPM and daily
+tokens per user. Overrides are atomically replaced in Valkey at
+`quota:limits:<user>` and read at admission time by the auth gateway, agent
+runtime and LiteLLM custom authentication. They survive service restarts;
+durability across a Valkey restart follows its configured persistence.
+
+An override takes precedence over both standard and P1 defaults. **Valeurs par
+défaut** removes overrides without resetting consumption or active reservations.
+Lowering a limit affects new admissions, not already-running requests. Global
+cluster limits still apply independently. Missing or invalid required shared
+configuration fails closed. The console shows daily consumed/reserved tokens
+and agent concurrency; LiteLLM's rolling RPM/TPM usage counters are not shown.
 
 ## 6. Changing configuration safely
 

@@ -148,6 +148,68 @@ class QuotaExceededException(Exception):
 
 class QuotaManager:
     RESERVATION_TTL_SECONDS = 8 * 24 * 60 * 60
+    LIMIT_BOUNDS = {"concurrency": (1, 10), "rpm": (1, 10000), "tpm": (1, 10000000), "daily_tokens": (1, 1000000000)}
+
+    @classmethod
+    def validate_limits(cls, limits: Dict[str, Any]) -> Dict[str, int]:
+        if not isinstance(limits, dict) or set(limits) - cls.LIMIT_BOUNDS.keys():
+            raise ValueError("Unknown quota fields")
+        for field, value in limits.items():
+            low, high = cls.LIMIT_BOUNDS[field]
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError(f"{field} must be an integer between {low} and {high}")
+        return dict(limits)
+
+    def get_limits(self, user_id: str, is_p1: Optional[bool] = None) -> Dict[str, int]:
+        if is_p1 is None:
+            is_p1 = self.is_p1_elevated(user_id)
+        limits = {"concurrency": 6 if is_p1 else 2, "rpm": 200 if is_p1 else 60,
+                  "tpm": 500000 if is_p1 else 150000, "daily_tokens": 10000000 if is_p1 else 2000000}
+        r = self.redis
+        if r is None:
+            if self.require_shared:
+                raise ConnectionError("Shared quota state unavailable")
+            return limits
+        try:
+            raw = r.get(f"quota:limits:{user_id}")
+            if raw:
+                limits.update(self.validate_limits(json.loads(raw)))
+            return limits
+        except Exception as exc:
+            raise ConnectionError("Shared quota configuration unavailable") from exc
+
+    def set_limits(self, user_id: str, limits: Dict[str, Any]) -> None:
+        limits = self.validate_limits(limits)
+        r = self.redis
+        if r is None:
+            raise ConnectionError("Shared quota state unavailable")
+        try:
+            # One atomic replacement; an empty object restores normal/P1 defaults.
+            r.set(f"quota:limits:{user_id}", json.dumps(limits))
+        except Exception as exc:
+            raise ConnectionError("Shared quota configuration unavailable") from exc
+
+    def quota_snapshot(self, user_id: str) -> Dict[str, Any]:
+        r = self.redis
+        if r is None:
+            raise ConnectionError("Shared quota state unavailable")
+        try:
+            elevated = self.is_p1_elevated(user_id)
+            limits = self.get_limits(user_id, elevated)
+            day, now = self._quota_day(), time.time()
+            reservation_ids = r.zrangebyscore(f"daily_reservations:index:{user_id}:{day}", f"({now}", "+inf")
+            reserved = sum(int(value or 0) for value in r.hmget(
+                f"daily_reservations:active:{user_id}:{day}", reservation_ids
+            )) if reservation_ids else 0
+            return {"user_id": user_id, "limits": limits, "p1_elevated": elevated,
+                    "overrides": json.loads(r.get(f"quota:limits:{user_id}") or "{}"),
+                    "day": day, "timezone": os.getenv("QUOTA_TIMEZONE", "UTC"),
+                    "usage": {"concurrency": r.zcount(f"quota:leases:user:{user_id}", f"({now}", "+inf"),
+                              "daily_tokens": int(r.get(f"daily_tokens:{user_id}:{day}") or 0),
+                              "reserved_tokens": reserved}}
+        except Exception as exc:
+            raise ConnectionError("Shared quota state unavailable") from exc
+
     def __init__(
         self,
         valkey_url: Optional[str] = None,
@@ -302,7 +364,7 @@ class QuotaManager:
         lease accounting rather than refusing every request.
         """
         is_p1 = self.is_p1_elevated(user_id)
-        limit = 6 if is_p1 else 2
+        limit = self.get_limits(user_id, is_p1)["concurrency"]
         cluster_limit = 10 if is_p1 else 8
         lease_id = f"lease:{user_id}:{uuid.uuid4().hex}"
         now = time.time()
@@ -431,7 +493,7 @@ class QuotaManager:
     # --- Rate Limiting (60 RPM) ---
     def check_and_record_rpm(self, user_id: str) -> int:
         is_p1 = self.is_p1_elevated(user_id)
-        limit = 200 if is_p1 else 60
+        limit = self.get_limits(user_id, is_p1)["rpm"]
         now = time.time()
         rpm_key = f"rate:rpm:{user_id}"
 
@@ -465,7 +527,7 @@ class QuotaManager:
     # --- Daily Token Budget (2M Tokens with Midnight Rollover) ---
     def check_daily_token_budget(self, user_id: str, estimated_tokens: int = 0) -> Tuple[int, int]:
         is_p1 = self.is_p1_elevated(user_id)
-        limit = 10_000_000 if is_p1 else 2_000_000
+        limit = self.get_limits(user_id, is_p1)["daily_tokens"]
         today_str = self._quota_day()
         daily_key = f"daily_tokens:{user_id}:{today_str}"
 
@@ -508,7 +570,7 @@ class QuotaManager:
         if not reservation_id or estimated_tokens < 0:
             raise ValueError("A reservation ID and non-negative estimate are required")
         day = admission_day or self._quota_day()
-        limit = 10_000_000 if self.is_p1_elevated(user_id) else 2_000_000
+        limit = self.get_limits(user_id)["daily_tokens"]
         now = time.time()
         expires_at = now + self.RESERVATION_TTL_SECONDS
         daily_key = f"daily_tokens:{user_id}:{day}"

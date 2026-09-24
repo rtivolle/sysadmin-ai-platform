@@ -65,7 +65,12 @@ leading numbering like `1.` stripped) and keeps its subsections.
 4. Executes via `bwrap-runner.sh <workspace> /bin/sh -c <command>`.
 
 The runtime's `tool_registry` records a `ToolExecutionRecord` for every outcome
-and writes an audit event.
+and writes an audit event: success and non-zero results, a workspace mismatch,
+a `BLOCKED` command, an approval request, a denied/reused approval, an unknown
+tool and a dispatcher exception. The direct HTTP path
+(`POST /api/tools/execute`) audits the same outcomes. See
+[status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md) for the exact fields and the
+paths that remain unaudited.
 
 ---
 

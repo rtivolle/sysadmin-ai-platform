@@ -95,10 +95,10 @@ user keys.
 The Mila logo (`gateway/assets/mila-logo.png`, vendored from
 <https://mila.quebec/>) and the shared `gateway/assets/brand.css` (accent
 `#003cc5`, slate `#353641`) brand the login page and console. The harness
-surface gets the title `Mila — Sysadmin AI` and the Mila favicon through the
-plugin's supported webserver `tapIndex` seam
-(`dsh-plugin-sysadmin/lib/branding.js`), not a UI fork; deeper in-app theming is
-not supported.
+surface gets the same mark in the sidebar and the blank-session hero, the
+signed-in user in the sidebar foot, and that user's workspace files, through
+the plugin's client bundle — not a UI fork. The gateway keeps the browser
+`Host` so the harness session is not rejected as cross-origin after login.
 
 ## Layout
 

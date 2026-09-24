@@ -30,7 +30,7 @@ if [ "${1:-}" = "--tui" ] || [ "${1:-}" = "-i" ]; then
   if [ ! -x "$VENV_PYTHON" ]; then
     echo "Bootstrapping environment for TUI wizard..."
     python3 -m venv "${VENV_DIR}"
-    "${VENV_DIR}/bin/pip" install -q "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic rich
+    "${VENV_DIR}/bin/pip" install -q "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic rich huggingface_hub
   fi
   exec "$VENV_PYTHON" "${BACKEND_DIR}/installer_tui.py"
 fi
@@ -145,8 +145,11 @@ fi
 
 echo "  [+] Checking / updating required python packages..."
 "${VENV_DIR}/bin/pip" install -q --prefer-binary \
-  "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic
+  "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic huggingface_hub
 echo "  [+] Python dependencies verified."
+echo "  [i] vLLM is not installed by this script: it is CUDA/driver specific and"
+echo "      heavy. Install a pinned vllm build on the GPU host to serve local"
+echo "      models (see docs/model-management.md)."
 
 # 5. Configurations & Script Permissions
 echo "[5/6] Finalizing configurations and permissions..."

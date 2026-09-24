@@ -15,9 +15,37 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 import uvicorn
 
+BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
 app = FastAPI(title="Sysadmin AI Platform Inference Engine", version="1.0.0")
 
 UPSTREAM_VLLM_URL = os.getenv("UPSTREAM_VLLM_URL", "")
+
+
+def _registry_running_models() -> List[Dict[str, Any]]:
+    """Locally downloaded models whose vLLM server is currently running."""
+    try:
+        from services.model_manager.registry import STATUS_RUNNING, model_registry
+        return [entry for entry in model_registry.all() if entry.get("status") == STATUS_RUNNING]
+    except Exception:
+        return []
+
+
+def _local_model_port(model: str) -> Optional[int]:
+    for entry in _registry_running_models():
+        if entry.get("name") == model:
+            return (entry.get("server") or {}).get("port")
+    return None
+
+
+def _is_registry_model(model: str) -> bool:
+    try:
+        from services.model_manager.registry import model_registry
+        return model_registry.get(model) is not None
+    except Exception:
+        return False
 
 MODELS = [
     {
@@ -54,7 +82,13 @@ async def health():
 
 @app.get("/v1/models")
 async def list_models():
-    return {"object": "list", "data": MODELS}
+    entries = list(MODELS)
+    known = {entry["id"] for entry in entries}
+    for entry in _registry_running_models():
+        name = entry.get("name")
+        if name and name not in known:
+            entries.append({"id": name, "object": "model", "created": int(time.time()), "owned_by": "local-vllm"})
+    return {"object": "list", "data": entries}
 
 def simulate_chat_completion(messages: list, model: str = "fast-model") -> str:
     """Generates simulated model completions for dev/test without physical GPUs."""
@@ -130,13 +164,20 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     stream = body.get("stream", False)
 
-    # 1. Forward to upstream vLLM if configured
-    if UPSTREAM_VLLM_URL:
+    # 1. Route a locally-managed model to its own vLLM instance, else proxy upstream.
+    local_port = _local_model_port(model)
+    if local_port is None and _is_registry_model(model):
+        raise HTTPException(status_code=503, detail=f"Model '{model}' is registered but not running")
+
+    upstream_base = f"http://127.0.0.1:{local_port}/v1" if local_port else (
+        f"{UPSTREAM_VLLM_URL.rstrip('/')}/v1" if UPSTREAM_VLLM_URL else ""
+    )
+    if upstream_base:
         async with httpx.AsyncClient(timeout=120.0) as client:
             headers = {k: v for k, v in request.headers.items() if k.lower() not in ["host", "content-length"]}
             try:
                 upstream_resp = await client.post(
-                    f"{UPSTREAM_VLLM_URL.rstrip('/')}/v1/chat/completions",
+                    f"{upstream_base}/chat/completions",
                     json=body,
                     headers=headers
                 )
@@ -144,7 +185,7 @@ async def chat_completions(request: Request):
                     return StreamingResponse(upstream_resp.aiter_raw(), media_type="text/event-stream")
                 return JSONResponse(upstream_resp.json(), status_code=upstream_resp.status_code)
             except Exception as e:
-                raise HTTPException(status_code=502, detail=f"Error connecting to upstream vLLM: {str(e)}")
+                raise HTTPException(status_code=502, detail=f"Error connecting to vLLM backend: {str(e)}")
 
     # 2. Local Simulated Inference (Zero GPU overhead for dev/test)
     req_id = f"chatcmpl-{int(time.time()*1000)}"

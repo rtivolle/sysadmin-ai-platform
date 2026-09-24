@@ -8,6 +8,11 @@ const state = {
   logUser: null,
   logTimer: null,
   serviceOutput: '',
+  quotaDirty: false,
+  quotaLoading: false,
+  quotaSaving: false,
+  localModelsDirty: false,
+  localModelsBusy: false,
 }
 
 const $ = (id) => document.getElementById(id)
@@ -101,10 +106,14 @@ function refreshActive() {
   const render = {
     overview: renderOverview,
     users: renderUsers,
+    quotas: renderQuotas,
     instances: renderInstances,
+    models: renderModels,
+    'local-models': renderLocalModels,
     approvals: renderApprovals,
     audit: () => {},
     services: renderServices,
+    hardware: renderHardware,
   }[tab]
   if (render) render().catch((error) => setError(error.message))
 }
@@ -150,7 +159,7 @@ $('tabs').addEventListener('click', (event) => {
   for (const tabButton of $('tabs').querySelectorAll('button')) {
     tabButton.classList.toggle('active', tabButton === button)
   }
-  for (const name of ['overview', 'users', 'instances', 'approvals', 'audit', 'services']) {
+  for (const name of ['overview', 'users', 'quotas', 'instances', 'models', 'local-models', 'approvals', 'audit', 'services', 'hardware']) {
     $(`tab-${name}`).hidden = name !== state.activeTab
   }
   setError('')
@@ -261,6 +270,236 @@ async function renderUsers() {
   }
 }
 
+// ── Quotas ──────────────────────────────────────────────────────────────────
+
+const quotaLabels = { concurrency: 'Requêtes simultanées', rpm: 'Requêtes / minute', tpm: 'Tokens / minute', daily_tokens: 'Tokens / jour' }
+
+async function renderQuotas() {
+  if (state.quotaDirty || state.quotaLoading || state.quotaSaving) return
+  state.quotaLoading = true
+  try {
+    const data = await api('/api/admin/quotas')
+    if (state.quotaDirty || state.quotaSaving) return
+    $('tab-quotas').innerHTML = `
+      <div class="mila-section">
+        <h2>Quotas par utilisateur</h2>
+        <p class="mila-muted">Limites partagées dans Valkey, appliquées aux prochaines admissions et requêtes LiteLLM. Les requêtes en cours et les compteurs restent inchangés. Une limite personnalisée s’applique aussi pendant une élévation P1.</p>
+        <p class="mila-muted">Usage : requêtes actives de l’agent, tokens consommés et réservés aujourd’hui. Les limites RPM/TPM sont appliquées par LiteLLM ; ses compteurs ne sont pas exposés ici. Le plafond de concurrence global reste indépendant.</p>
+        <div class="quota-grid">${data.users.map((user) => `
+          <form class="quota-card" data-quota-user="${esc(user.user_id)}">
+            <h3>${esc(user.user_id)} ${user.p1_elevated ? '<span class="mila-badge warn">P1</span>' : ''}</h3>
+            <p class="mila-muted">${esc(user.day)} · ${esc(user.timezone)}<br>
+              Actives : ${esc(user.usage.concurrency)} · Consommés : ${esc(user.usage.daily_tokens.toLocaleString())}<br>
+              Réservés : ${esc(user.usage.reserved_tokens.toLocaleString())}</p>
+            ${Object.entries(quotaLabels).map(([field, label]) => `
+              <label>${label}<input class="mila-input" type="number" name="${field}" min="${data.bounds[field][0]}" max="${data.bounds[field][1]}" step="1" value="${user.limits[field]}" required></label>`).join('')}
+            <div class="mila-row">
+              <button class="mila-button" type="submit">Enregistrer</button>
+              <button class="mila-button secondary" type="button" data-quota-reset>Valeurs par défaut</button>
+            </div>
+            <p class="mila-muted quota-status" role="status">${Object.keys(user.overrides).length ? 'Limites personnalisées' : 'Valeurs par défaut'}</p>
+          </form>`).join('')}</div>
+      </div>`
+    for (const form of $('tab-quotas').querySelectorAll('form')) {
+      form.addEventListener('input', () => {
+        form.dataset.dirty = '1'
+        state.quotaDirty = true
+        form.querySelector('.quota-status').textContent = 'Modifications non enregistrées'
+      })
+      form.addEventListener('submit', (event) => { event.preventDefault(); saveQuota(form, false) })
+      form.querySelector('[data-quota-reset]').addEventListener('click', () => saveQuota(form, true))
+    }
+  } finally {
+    state.quotaLoading = false
+  }
+}
+
+async function saveQuota(form, reset) {
+  if (state.quotaSaving) return
+  const user = form.dataset.quotaUser
+  const limits = reset ? {} : Object.fromEntries(Object.keys(quotaLabels).map((field) => [field, Number(form.elements[field].value)]))
+  const status = form.querySelector('.quota-status')
+  state.quotaSaving = true
+  form.querySelectorAll('button, input').forEach((control) => { control.disabled = true })
+  status.textContent = 'Enregistrement…'
+  try {
+    await api(`/api/admin/quotas/${encodeURIComponent(user)}`, { method: 'POST', body: { limits } })
+    const fresh = await api('/api/admin/quotas')
+    const updated = fresh.users.find((entry) => entry.user_id === user)
+    if (!updated) throw new Error('Utilisateur absent après enregistrement')
+    for (const field of Object.keys(quotaLabels)) form.elements[field].value = updated.limits[field]
+    form.dataset.dirty = '0'
+    state.quotaDirty = Boolean($('tab-quotas').querySelector('[data-dirty="1"]'))
+    status.textContent = reset ? 'Valeurs par défaut restaurées' : 'Limites enregistrées'
+    setError('')
+  } catch (error) {
+    form.dataset.dirty = '1'
+    state.quotaDirty = true
+    status.textContent = error.message
+  } finally {
+    state.quotaSaving = false
+    form.querySelectorAll('button, input').forEach((control) => { control.disabled = false })
+  }
+}
+
+// ── Models ──────────────────────────────────────────────────────────────────
+
+async function renderModels() {
+  const data = await api('/api/admin/models')
+  const modes = { simulated: 'Simulation locale', 'vllm-proxy': 'Proxy vLLM configuré', unknown: 'État du moteur indisponible' }
+  $('tab-models').innerHTML = `
+    <div class="mila-section">
+      <h2>Modèles disponibles <span class="mila-badge ${data.inferenceMode === 'simulated' ? 'warn' : ''}">${esc(modes[data.inferenceMode] ?? data.inferenceMode)}</span></h2>
+      <p class="mila-muted">Catalogue publié par ${esc(data.source)}. Ces identifiants sont sélectionnables dans le harnais. Une entrée dans le catalogue ne prouve pas qu’un modèle GPU est chargé.</p>
+      <table class="mila-table"><thead><tr><th>Identifiant du modèle</th><th>Propriétaire déclaré</th></tr></thead><tbody>
+        ${data.models.map((model) => `<tr><td><code>${esc(model.id)}</code></td><td>${esc(model.owned_by || '—')}</td></tr>`).join('') || '<tr><td colspan="2">Aucun modèle publié par LiteLLM</td></tr>'}
+      </tbody></table>
+    </div>`
+}
+
+// ── Local models ──────────────────────────────────────────────────────────────
+
+const modelStatusLabels = {
+  registered: 'enregistré', downloading: 'téléchargement', downloaded: 'téléchargé',
+  starting: 'démarrage', running: 'en service', stopped: 'arrêté', error: 'erreur',
+}
+
+function modelStatusBadge(status) {
+  const cls = status === 'running' || status === 'downloaded' ? 'ok' : status === 'error' ? 'bad' : 'warn'
+  return `<span class="mila-badge ${cls}">${esc(modelStatusLabels[status] ?? status)}</span>`
+}
+
+function fmtBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '—'
+  const units = ['o', 'Kio', 'Mio', 'Gio', 'Tio']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1 }
+  return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+async function renderLocalModels() {
+  if (state.localModelsDirty || state.localModelsBusy) return
+  const data = await api('/api/admin/local-models')
+  const rows = data.models.map((model) => {
+    const server = model.server ?? {}
+    const running = model.status === 'running'
+    const started = ['downloaded', 'stopped', 'running', 'error'].includes(model.status)
+    return `<tr>
+      <td><code>${esc(model.name)}</code><br><span class="mila-muted">${esc(model.hf_repo)}${model.revision ? `@${esc(model.revision)}` : ''}</span></td>
+      <td>${modelStatusBadge(model.status)}${model.last_error ? `<br><span class="mila-muted">${esc(model.last_error)}</span>` : ''}</td>
+      <td>${esc(fmtBytes(model.size_bytes))}</td>
+      <td>${server.port ? esc(`:${server.port} pid ${server.pid ?? '—'}`) : '—'}</td>
+      <td>
+        <div class="mila-row">
+          ${['registered', 'error'].includes(model.status) ? `<button class="mila-button secondary" data-model="${esc(model.name)}" data-action="download">Télécharger</button>` : ''}
+          ${started && !running ? `<button class="mila-button" data-model="${esc(model.name)}" data-action="start">Démarrer</button>` : ''}
+          ${running ? `<button class="mila-button secondary" data-model="${esc(model.name)}" data-action="restart">Redémarrer</button>` : ''}
+          ${running ? `<button class="mila-button danger" data-model="${esc(model.name)}" data-action="stop">Arrêter</button>` : ''}
+          <button class="mila-button secondary" data-model="${esc(model.name)}" data-action="logs">Journal</button>
+          ${!running && model.status !== 'starting' ? `<button class="mila-button danger" data-model="${esc(model.name)}" data-action="delete">Supprimer</button>` : ''}
+        </div>
+      </td></tr>`
+  }).join('')
+  $('tab-local-models').innerHTML = `
+    <div class="mila-section">
+      <h2>Modèles locaux</h2>
+      <p class="mila-muted">Enregistrer un dépôt HuggingFace, le télécharger, puis démarrer un serveur vLLM local. Un modèle n’est sélectionnable qu’une fois <em>en service</em>. Le téléchargement et le démarrage prennent plusieurs minutes.</p>
+      <form id="local-model-form" class="quota-card">
+        <label>Dépôt HuggingFace ou lien<input class="mila-input" name="hf_repo" placeholder="org/model ou https://huggingface.co/org/model" required></label>
+        <label>Nom du service (optionnel)<input class="mila-input" name="name" placeholder="déduit du dépôt"></label>
+        <label>Révision (optionnel)<input class="mila-input" name="revision" placeholder="main"></label>
+        <button class="mila-button" type="submit">Enregistrer</button>
+      </form>
+      <div id="local-model-log" hidden></div>
+      <table class="mila-table"><thead><tr><th>Modèle</th><th>État</th><th>Taille</th><th>Serveur</th><th>Actions</th></tr></thead><tbody>
+        ${rows || '<tr><td colspan="5">Aucun modèle local enregistré</td></tr>'}
+      </tbody></table>
+    </div>`
+
+  $('local-model-form').addEventListener('input', () => { state.localModelsDirty = true })
+  $('local-model-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const form = event.target
+    const body = {
+      hf_repo: form.elements.hf_repo.value,
+      name: form.elements.name.value || undefined,
+      revision: form.elements.revision.value || undefined,
+    }
+    state.localModelsBusy = true
+    try {
+      await api('/api/admin/local-models', { method: 'POST', body })
+      state.localModelsDirty = false
+      setError('')
+    } catch (error) {
+      setError(error.message)
+    } finally {
+      state.localModelsBusy = false
+      renderLocalModels().catch((error) => setError(error.message))
+    }
+  })
+
+  for (const button of $('tab-local-models').querySelectorAll('[data-model]')) {
+    button.addEventListener('click', () => runModelAction(button.dataset.model, button.dataset.action))
+  }
+}
+
+async function runModelAction(name, action) {
+  if (action === 'delete' && !confirm(`Supprimer le modèle ${name} ? Les fichiers téléchargés seront effacés.`)) return
+  if (action === 'logs') {
+    try {
+      const data = await api(`/api/admin/local-models/${encodeURIComponent(name)}/logs`)
+      const view = $('local-model-log')
+      view.hidden = false
+      view.innerHTML = `<h3>Journal vLLM — ${esc(name)}</h3><pre>${esc(data.output || '(vide)')}</pre>`
+      setError('')
+    } catch (error) { setError(error.message) }
+    return
+  }
+  state.localModelsBusy = true
+  try {
+    const query = action === 'delete' ? '?delete_files=1' : ''
+    await api(`/api/admin/local-models/${encodeURIComponent(name)}/${action}${query}`, { method: 'POST', body: {} })
+    setError('')
+  } catch (error) {
+    setError(error.message)
+  } finally {
+    state.localModelsBusy = false
+    renderLocalModels().catch((error) => setError(error.message))
+  }
+}
+
+// ── Hardware survey ───────────────────────────────────────────────────────────
+
+async function renderHardware(refresh = false) {
+  const data = await api(`/api/admin/survey${refresh ? '?refresh=1' : ''}`)
+  const gpuRows = (data.gpus ?? []).map((gpu) => `<tr><td>${esc(gpu.index)}</td><td>${esc(gpu.name)}</td><td>${esc(gpu.architecture)} ${esc(gpu.compute_capability)}</td><td>${esc(gpu.vram_total_mb)} Mo</td><td>${esc(gpu.vram_free_mb)} Mo</td><td>${esc(gpu.driver_version)}</td></tr>`).join('')
+  const pciRows = (data.pci_accelerators ?? []).map((device) => `<tr><td><code>${esc(device.slot)}</code></td><td>${esc(device.description)}</td><td>${esc(device.vendor_device_ids ?? '—')}</td><td>${esc(device.kernel_driver ?? '—')}</td></tr>`).join('')
+  const drivers = data.driver_stack ?? {}
+  const nvidia = drivers.nvidia ?? {}
+  const versions = data.software_versions ?? {}
+  const storage = data.model_storage ?? {}
+  $('tab-hardware').innerHTML = `
+    <div class="mila-section">
+      <h2>Matériel &amp; pilotes</h2>
+      <p class="mila-muted">Relevé ${esc(data.survey_timestamp ?? '')} · hôte ${esc(data.hostname ?? '')}. Mis en cache 10 s ; actualiser pour relancer les sondes.</p>
+      <button class="mila-button secondary" id="survey-refresh" type="button">Actualiser</button>
+      <h3>Accélérateurs NVIDIA</h3>
+      <table class="mila-table"><thead><tr><th>#</th><th>Nom</th><th>Architecture</th><th>VRAM</th><th>Libre</th><th>Pilote</th></tr></thead><tbody>${gpuRows || '<tr><td colspan="6">Aucun GPU NVIDIA détecté</td></tr>'}</tbody></table>
+      <h3>Périphériques PCI</h3>
+      <table class="mila-table"><thead><tr><th>Emplacement</th><th>Description</th><th>IDs</th><th>Pilote noyau</th></tr></thead><tbody>${pciRows || '<tr><td colspan="4">Aucun accélérateur PCI détecté</td></tr>'}</tbody></table>
+      <h3>Pilotes &amp; outils</h3>
+      <p class="mila-muted">Noyau ${esc(drivers.kernel_release ?? '—')} · modules ${esc((drivers.loaded_modules ?? []).join(', ') || '—')}<br>
+        NVIDIA présent : ${nvidia.present ? 'oui' : 'non'} · pilote ${esc(nvidia.smi_driver_version ?? '—')} · CUDA runtime ${esc(nvidia.cuda_runtime ?? '—')} · CUDA toolkit ${esc(nvidia.cuda_toolkit ?? '—')}</p>
+      <h3>Versions logicielles</h3>
+      <p class="mila-muted">Python ${esc(versions.python ?? '—')} · torch ${esc(versions.torch ?? 'absent')} · vLLM ${esc(versions.vllm ?? 'absent')} · huggingface_hub ${esc(versions.huggingface_hub ?? 'absent')} · litellm ${esc(versions.litellm ?? 'absent')}</p>
+      <h3>Stockage des modèles</h3>
+      <p class="mila-muted">${esc(storage.path ?? '—')} · libre ${esc(fmtBytes(storage.free_bytes))} / ${esc(fmtBytes(storage.total_bytes))}</p>
+      <table class="mila-table"><thead><tr><th>Répertoire</th><th>Taille</th></tr></thead><tbody>${(storage.entries ?? []).map((entry) => `<tr><td><code>${esc(entry.name)}</code></td><td>${esc(fmtBytes(entry.size_bytes))}</td></tr>`).join('') || '<tr><td colspan="2">Aucun modèle téléchargé</td></tr>'}</tbody></table>
+    </div>`
+  $('survey-refresh').addEventListener('click', () => renderHardware(true).catch((error) => setError(error.message)))
+}
+
 // ── Instances ───────────────────────────────────────────────────────────────
 
 function renderInstanceBadge(instance) {
@@ -271,7 +510,9 @@ function renderInstanceBadge(instance) {
 }
 
 async function renderInstances() {
-  const { instances } = await api('/api/admin/instances')
+  const [{ instances: known }, { users }] = await Promise.all([api('/api/admin/instances'), api('/api/admin/users')])
+  const instances = [...known, ...users.filter((user) => !known.some((instance) => instance.userId === user.userId))
+    .map((user) => ({ userId: user.userId, state: 'stopped', restarts: 0 }))]
   const rows = instances.map((instance) => `
     <tr>
       <td>${esc(instance.userId)}</td>
@@ -290,7 +531,7 @@ async function renderInstances() {
     </tr>`).join('')
   $('tab-instances').innerHTML = `
     <div class="mila-section">
-      <h2>Instances de harnais</h2>
+      <h2>Runtimes par utilisateur</h2>
       <p class="mila-muted">Une instance dsh par utilisateur connecté. Les journaux sont limités aux 32 derniers Kio par défaut et tournent à 2 Mio.</p>
       <table class="mila-table">
         <tr><th>Utilisateur</th><th>État</th><th>Démarrée</th><th>Redémarrages</th><th>Dernière erreur</th><th>Actions</th></tr>
@@ -456,12 +697,17 @@ async function renderServices() {
       <td>${service.running ? `<span class="mila-badge ok">actif</span>` : '<span class="mila-badge bad">arrêté</span>'}</td>
       <td>${esc(service.port ?? '—')}</td>
       <td>${esc(service.pid ?? '—')}</td>
-      <td><button class="mila-button secondary" data-service="${esc(service.name)}">Redémarrer</button></td>
+      <td>${service.name === 'harness_gateway' ? '<span class="mila-muted">Cette console · gestion depuis l’hôte</span>' : `
+        <div class="mila-row">
+          <button class="mila-button secondary" data-service="${esc(service.name)}" data-action="start" ${service.running ? 'disabled' : ''}>Démarrer</button>
+          <button class="mila-button secondary" data-service="${esc(service.name)}" data-action="restart">Redémarrer</button>
+          <button class="mila-button danger" data-service="${esc(service.name)}" data-action="stop" ${service.running ? '' : 'disabled'}>Arrêter</button>
+        </div>`}</td>
     </tr>`).join('')
   $('tab-services').innerHTML = `
     <div class="mila-section">
       <h2>Services backend</h2>
-      <p class="mila-muted">Redémarrage via <code>platform.sh service &lt;nom&gt; restart</code>, sérialisé, délai maximum 30 s.</p>
+      <p class="mila-muted">Contrôle via <code>platform.sh service</code>, sérialisé par service, délai maximum 30 s. Arrêter un service interrompt ses requêtes en cours.</p>
       <table class="mila-table">
         <tr><th>Service</th><th>État</th><th>Port</th><th>PID</th><th>Action</th></tr>
         ${rows}
@@ -471,13 +717,14 @@ async function renderServices() {
   for (const button of $('tab-services').querySelectorAll('[data-service]')) {
     button.addEventListener('click', async () => {
       const name = button.dataset.service
-      if (!confirm(`Redémarrer le service ${name} ?`)) return
+      const action = button.dataset.action
+      if (action !== 'start' && !confirm(`${action === 'stop' ? 'Arrêter' : 'Redémarrer'} le service ${name} ?`)) return
       button.disabled = true
-      state.serviceOutput = `Redémarrage de ${name}…`
+      state.serviceOutput = `${action} ${name}…`
       $('service-output').hidden = false
       $('service-output').textContent = state.serviceOutput
       try {
-        const result = await api(`/api/admin/services/${encodeURIComponent(name)}/restart`, { method: 'POST', body: {} })
+        const result = await api(`/api/admin/services/${encodeURIComponent(name)}/${action}`, { method: 'POST', body: {} })
         state.serviceOutput = result.output || 'OK'
         setError('')
       } catch (error) {

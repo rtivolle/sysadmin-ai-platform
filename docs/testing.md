@@ -8,25 +8,32 @@ Harness integration. `pytest.ini` sets `pythonpath = . backend`,
 
 | Tier | Directory | Focus |
 |---|---|---|
-| Tier 1 — unit | `backend/tests/tier1_unit/` | Models, parsing, tools, auth login, quota fail-closed, P1, target adapter, config lint, runbook reader, workspace assignment, tool schemas. |
+| Tier 1 — unit | `backend/tests/tier1_unit/` | Models, parsing, tools, auth login, quota fail-closed, admin quota policy, audit census, config-deploy integrity, P1, target adapter, config lint, runbook reader, workspace assignment, tool schemas. |
 | Tier 2 — sandbox | `backend/tests/tier2_sandbox/` | Bubblewrap isolation, cgroup limits, destructive-command interception, workspace isolation. Requires host support. |
 | Tier 3 — concurrency | `backend/tests/tier3_concurrency/` | Approval lifecycle/binding/HTTP, concurrency ceiling, rate limits, P1 elevation, adversarial challengers, read-only slice stress. |
 | Tier 4 — recovery | `backend/tests/tier4_recovery/` | Outbox resilience, DR drill, restore, adversarial P1/DR cases. |
 | End-to-end | `backend/tests/e2e/test_30_tasks.py` | Synthetic 30-task pack (log, config, runbook). |
 | Stress qualification | `backend/tests/qualification/sandbox_stress.sh` | Kernel-backed stress run of the sandbox: real OOM kill at the 4 GiB ceiling, 128-task ceiling, 2-CPU throttling, 15 s deadline, live network denial, filesystem confinement. Not a pytest suite; run on the target host. |
+| Restore qualification | `backend/tests/qualification/restore_drill.py` | Backup to clean-staging restore drill: byte-for-byte verification, manifest/hash chain, pre-write rejection of unsafe archives, measured backup/restore timings. Supports `--real` and `--scale N`. Not pytest-collected. |
 
-Approximate test-function counts in the current tree:
+Approximate test-function counts in the current tree (measured 2026-09-24;
+parametrized cases expand to more collected tests):
 
 | Tier | Functions |
 |---|---:|
-| tier1_unit | 89 |
-| tier2_sandbox | 21 |
+| tier1_unit | 139 |
+| tier2_sandbox | 37 |
 | tier3_concurrency | 72 |
 | tier4_recovery | 28 |
 | e2e | 2 |
 
+`backend/tests/test_platform.py` adds the live end-to-end sections outside the
+tiers. The whole suite collects **488 tests** (480 passed, 8 skipped on the
+2026-09-24 run — see [status/TEST_READY.md](status/TEST_READY.md)).
+
 The Harness integration has `packages/harness-integration/tests/`:
-`policy.test.mjs`, `audit.test.mjs`, `gateway.test.mjs`.
+`policy.test.mjs`, `audit.test.mjs`, `gateway.test.mjs`, `admin.test.mjs`,
+`branding.test.mjs`, `session-persistence.test.mjs`.
 
 ## 2. Running tests
 
@@ -91,6 +98,16 @@ historical restricted-workspace run; the current host results are in that file:
 - Valkey-backed approvals fail closed during shared-store outages.
 - P1 revocation invalidates every token issued to the user.
 - Restore rejects missing components and unsafe archive paths before writing.
+- Per-user quota overrides are validated against fixed bounds, shared across
+  managers/workers, applied to concurrency, RPM and daily admissions, and fail
+  closed on corruption or a store outage.
+- Every enumerated tool, approval, target-adapter and admin path emits a
+  canonical audit event for success **and** failure; unaudited paths are pinned
+  by sentinel tests. See [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md).
+- Config deployment rejects a destination created, deleted or changed after
+  approval (including line-ending-only changes), preserves the existing Unix
+  mode and owner, creates new files `0600`, and aborts before replacement if
+  those attributes cannot be applied.
 
 ## 5. Environment limits (current)
 
@@ -117,8 +134,12 @@ historical restricted-workspace run; the current host results are in that file:
 4. ~~Perform a kernel-backed sandbox stress run.~~ Done on the
    `systemd-run` leg (see §5); re-run on the production host to qualify the
    raw cgroup-delegation leg under the platform account's delegated subtree.
-5. Verify audit query completeness.
-6. Run a full restore drill against clean staging and measure RTO.
+5. ~~Verify audit query completeness.~~ The per-path census is published in
+   [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md) and pinned by
+   `test_audit_census.py`; the open gaps (runtime chat turns, LiteLLM failures,
+   quota denials, auth login/logout/`401`s, cancellation) and live-store query
+   completeness remain open.
+6. ~~Run a full restore drill against clean staging and measure RTO.~~ Done at the file level (2026-09-24, `backend/tests/qualification/restore_drill.py`, all modes pass). Post-restore service bring-up from restored state and production-sized data remain open.
 7. Qualify the target adapter's privileged execution boundary and a clean
    staging target deployment.
 

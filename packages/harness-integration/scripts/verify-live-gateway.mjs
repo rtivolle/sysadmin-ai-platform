@@ -37,6 +37,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { loadConfig } from '../gateway/config.js'
+import { findFreePort } from '../gateway/instance-manager.js'
 import { createGateway, waitForLaunchToken } from '../gateway/server.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -253,7 +254,11 @@ async function main() {
   }
 
   const gateway = createGateway({ config, logger: () => {} })
-  const firstGateway = await gateway.start(0)
+  // The gateway preserves the browser Host, so the harness session cookie is
+  // bound to the gateway authority. Production always rebinds :3085; model the
+  // same by reusing one free port across the restart below.
+  const gatewayPort = await findFreePort('127.0.0.1', 33000, 34000)
+  const firstGateway = await gateway.start(gatewayPort)
   let currentUrl = firstGateway.url
   let activeGateway = gateway
   console.log(`gateway listening on ${currentUrl}\n`)
@@ -621,7 +626,10 @@ async function main() {
     activeGateway = null
     const gateway2 = createGateway({ config, logger: () => {} })
     activeGateway = gateway2
-    const secondGateway = await gateway2.start(0)
+    // Same port as the first start: the harness cookies were minted against
+    // this authority (Host preservation), exactly like a :3085 rebind in
+    // production.
+    const secondGateway = await gateway2.start(gatewayPort)
     currentUrl = secondGateway.url
     console.log(`\ngateway restarted on ${currentUrl} with the same state root\n`)
 
