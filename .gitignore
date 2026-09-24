@@ -27,6 +27,7 @@ backend/config/keys/initial-passwords.txt
 # Local agent metadata and scratch state
 .agents/
 .codex/
+.opencode/
 .harness-scratch/
 .live-scratch/
 
