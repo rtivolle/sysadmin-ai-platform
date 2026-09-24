@@ -2,14 +2,14 @@
 
 This directory documents the **implemented** on-premises sysadmin AI platform that
 lives in this repository. It complements — and does not replace — the source
-requirement specifications at the repository root:
+requirement specifications:
 
-- `README.md` — short orientation and quick start.
-- `DEVELOPMENT_PLAN.md` — the proposed implementation baseline and backlog.
-- `TEST_READY.md` — the latest recorded verification results and limits.
-- `00 - Plan Directeur …` … `05 - Services Stockage & Audit …` — the six French
-  design specifications (also delivered as `.docx`). These are the authoritative
-  statement of intent; this documentation describes what the code *actually does*.
+- [`../README.md`](../README.md) — short orientation and quick start.
+- [`../AGENTS.md`](../AGENTS.md) — repository map, golden commands and guardrails.
+- [plans/DEVELOPMENT_PLAN.md](plans/DEVELOPMENT_PLAN.md) — the proposed implementation baseline and backlog.
+- [status/TEST_READY.md](status/TEST_READY.md) — the latest recorded verification results and limits.
+- [status/BENCHMARK_REPORT.md](status/BENCHMARK_REPORT.md) — the M4 qualification report and its re-verification addendum.
+- [specs/](specs/README.md) — the six French design specifications (also delivered as `.docx`). These are the authoritative statement of intent; this documentation describes what the code *actually does*.
 
 > **Status.** This is a prototype. It is **not qualified for production target
 > changes**. The scoped target adapter can propose and execute allow-listed
@@ -35,6 +35,10 @@ requirement specifications at the repository root:
 | [testing.md](testing.md) | Test tiers, how to run them, recorded results and environment limits. |
 | [development.md](development.md) | Repository layout, conventions and extension points. |
 | [glossary.md](glossary.md) | Terms and abbreviations used across the project. |
+| [specs/](specs/README.md) | The six source specifications and the code that implements each. |
+| [plans/DEVELOPMENT_PLAN.md](plans/DEVELOPMENT_PLAN.md) | Implementation baseline, backlog and corrections. |
+| [status/TEST_READY.md](status/TEST_READY.md) | Current verification results, environment limits and host notes. |
+| [status/BENCHMARK_REPORT.md](status/BENCHMARK_REPORT.md) | M4 soak qualification and the later re-verification addendum. |
 
 ## Reading paths
 
@@ -46,6 +50,8 @@ requirement specifications at the repository root:
   [services.md](services.md), [harness-integration.md](harness-integration.md).
 - **Auditor** — [security.md](security.md), [backup-restore.md](backup-restore.md),
   [configuration.md](configuration.md).
+- **Agent / automated contributor** — [`../AGENTS.md`](../AGENTS.md) first, then
+  [development.md](development.md) and [testing.md](testing.md).
 
 ## Documentation conventions
 

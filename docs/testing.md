@@ -58,7 +58,8 @@ port 4000, run the test, then `./platform.sh stop`.
 
 ## 3. Recorded results
 
-From `TEST_READY.md` (last checked 2026-09-24, restricted workspace):
+From [`status/TEST_READY.md`](status/TEST_READY.md) — the table below is the
+historical restricted-workspace run; the current host results are in that file:
 
 | Check | Result | Scope |
 |---|---:|---|

@@ -178,16 +178,18 @@ as untrusted data.
 
 ## 9. Known gaps
 
-These are carried over from `TEST_READY.md` and the code, and must be closed
-before any production target change:
+These are carried over from [`status/TEST_READY.md`](status/TEST_READY.md) and
+the code, and must be closed before any production target change:
 
 1. Privileged execution boundary and staging target deployment not qualified.
-2. Multi-worker Valkey integration run and runtime verification of lease
-   ownership/renewal outstanding.
+2. Multi-worker Valkey integration run outstanding. Lease acquisition,
+   renewal, release and daily-token reservation/settlement have been verified
+   against a live Valkey; see [`status/TEST_READY.md`](status/TEST_READY.md).
 3. Inference is simulated unless `UPSTREAM_VLLM_URL` is configured; Dynamo and
    the full Harness are not deployed by this codebase.
 4. Tier 2 sandbox/namespace/cgroup tests require a host with delegated writable
-   cgroups v2 and unprivileged namespaces; the current environment skips them.
+   cgroups v2 and unprivileged namespaces; they skip where those are missing and
+   pass on the current development host.
 5. Real owner-scored 30-task model evaluation not performed.
 6. Kernel-backed sandbox stress run not performed.
 7. Audit query completeness and full restore drill against clean staging remain.

@@ -3,6 +3,8 @@
 ## 1. Repository layout
 
 ```text
+AGENTS.md                     agent/human operating manual (map, commands, guardrails)
+Makefile                      golden commands (make help)
 backend/
   platform.sh                 service lifecycle manager
   sysadmin_cli.py             interactive terminal client
@@ -23,6 +25,10 @@ backend/
 packages/
   harness-integration/        profile, plugin, multi-user gateway, JS tests
 docs/                         this documentation set
+  specs/                      the six source specifications (.docx + .txt)
+  plans/DEVELOPMENT_PLAN.md   implementation baseline and backlog
+  status/TEST_READY.md        verification results and environment limits
+  status/BENCHMARK_REPORT.md  M4 qualification report and addendum
 install.sh                    one-command installer
 platform.sh -> backend/platform.sh
 sysadmin-chat                 CLI launcher
@@ -41,7 +47,9 @@ sysadmin-chat                 CLI launcher
   runtime, session history.
 - **JavaScript** — ES modules, Node 22+, no build step; tests use `node --test`.
 - **Documentation** — update this `docs/` set when behaviour changes, and record
-  verification results in `TEST_READY.md`.
+  verification results in `docs/status/TEST_READY.md`.
+- **Agents** — read [`../AGENTS.md`](../AGENTS.md) before changing anything; it
+  carries the golden commands, the guardrail list and the per-change test matrix.
 
 ## 3. Common tasks
 
@@ -102,5 +110,6 @@ This is intentional and must be preserved rather than papered over:
 | 50 % TTFT / sub-10 ms sandbox startup etc. | Hypotheses, not measured acceptance evidence. |
 | "100 % FOSS" | An application-level claim; GPU drivers, model weights and runtime dependencies need a separate licence inventory. |
 
-See `DEVELOPMENT_PLAN.md` §3 for the original corrections list and
-`TEST_READY.md` for the current verification status.
+See [`plans/DEVELOPMENT_PLAN.md`](plans/DEVELOPMENT_PLAN.md) §3 for the original
+corrections list and [`status/TEST_READY.md`](status/TEST_READY.md) for the
+current verification status.

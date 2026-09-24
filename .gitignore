@@ -27,10 +27,11 @@ backend/config/keys/initial-passwords.txt
 *.env
 .env*
 
-# Local agent metadata
+# Local agent metadata and scratch state
 .agents/
 .codex/
 .harness-scratch/
+.live-scratch/
 
 # Test-generated target deployment artifacts
 backend/config/test_deploy/

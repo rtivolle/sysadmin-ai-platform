@@ -34,7 +34,7 @@ The qualification suite comprehensively validated all functional, security, conc
 | **Audit Completeness & Outbox** | 100% queryable via LogsQL | Verified live with zero-loss replay | **PASS** |
 | **Disaster Recovery** | RTO < 4h, RPO < 24h | Cold staging restore sequence verified | **PASS** |
 
-**Final Assessment**: The platform satisfies 100% of functional, operational, and security criteria defined in `ORIGINAL_REQUEST.md`, `DEVELOPMENT_PLAN.md`, and `PROJECT.md`. It is certified **PRODUCTION-READY**.
+**Final Assessment**: The platform satisfies the functional, operational, and security criteria exercised by the automated and live suites defined in `ORIGINAL_REQUEST.md` and [`../plans/DEVELOPMENT_PLAN.md`](../plans/DEVELOPMENT_PLAN.md). Read this decision together with the qualification scope in Addendum A.3: the automated evidence supports the benchmark result, not a production target-change certificate.
 
 ---
 
