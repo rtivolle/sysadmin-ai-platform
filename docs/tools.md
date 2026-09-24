@@ -24,7 +24,7 @@ Streams a log file (or queries `journalctl`) without buffering the whole file.
   `journalctl -u <unit> --no-pager -n 1000 --grep <pattern>` (10 s timeout); the
   unit name must match `^[A-Za-z0-9_@.\-]+$`.
 - File targets are resolved and confined (see
-  [security.md](security.md#path-confinement)). If `/usr/bin/rg` exists it is
+  [security.md](security.md#path-confinement-backend-tools)). If `/usr/bin/rg` exists it is
   used with a 512 KiB output cap and early termination; otherwise a pure-Python
   line-by-line engine runs (context via a ring buffer, RSS well under 100 MB).
 - Result: `matched`, `target`, `pattern`, `match_count`, `line_numbers`,

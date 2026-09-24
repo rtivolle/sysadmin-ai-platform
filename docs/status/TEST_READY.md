@@ -5,8 +5,8 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
 | Check | Result | Scope |
 |---|---:|---|
 | Full backend suite against the live local stack (2026-09-24) | 356 passed, 0 failed, 0 skipped | `backend/.venv/bin/python3 -m pytest -q` with Valkey, VictoriaLogs, SeaweedFS, inference, ForwardAuth, Traefik, and the agent platform reachable |
-| Full backend suite including the M4 adversarial challenger pack (services stopped) | 430 passed, 6 skipped | The six skips are the live ForwardAuth/Traefik checks in `tier3_concurrency/test_empirical_challenger.py`, which need running services; `tier2_sandbox/test_m4_empirical_challenger.py` adds 80 independent challenge cases |
-| Tier 2 sandbox suite on this host | 49 passed | Bubblewrap and delegated cgroups v2 are available here, so isolation, deadline, and cgroup-ceiling checks executed instead of skipping |
+| Full backend suite with no live stack (2026-09-24) | 423 passed, 13 skipped | 436 tests collected. The 13 skips are the six live ForwardAuth/Traefik checks plus the seven `test_platform.py` sections, which now skip when the stack is down and fail on a recorded error instead of passing silently; `tier2_sandbox/test_m4_empirical_challenger.py` contributes 80 independent challenge cases |
+| Tier 2 sandbox suite on this host | 129 passed | Bubblewrap and delegated cgroups v2 are available here, so isolation, deadline, and cgroup-ceiling checks executed instead of skipping: 49 core checks plus the 80-case M4 challenger pack |
 | Live concurrency-lease lifecycle against Valkey | Passed | Two leases admitted, a third rejected with the 2/2 ceiling, lease renewal accepted, both releases returned the user and cluster lease sets to zero, and re-admission succeeded immediately |
 | Daily token reservation and settlement | 8 passed (6 process-local, 2 against live Valkey) | Atomic admission, duplicate-ID rejection, exactly-once settlement, capacity release, and fail-closed behaviour when the shared store is required but unreachable |
 | Live stack end-to-end (`backend/tests/test_platform.py` checks) | All sections passed | Valkey, VictoriaLogs ingestion, SeaweedFS master + S3, inference models + SSE, ForwardAuth, bounded tools, sandboxed execution, destructive-command 403, approval-gate approval, and Traefik routing/ForwardAuth. See the host note on port 3080 |
@@ -51,6 +51,8 @@ For live tests, start the services in the same host session, wait for LiteLLM on
 - Releasing a concurrency lease falls back to process-local bookkeeping when the shared store is momentarily unusable; in-flight leases cannot strand until their TTL expires.
 - Cleanup for a disconnected or cancelled request reclaims the lease and the registry entry before its first await, because cancellation is re-delivered at that await.
 - Daily token admission reserves capacity atomically and settlement replaces the estimate with actual usage exactly once, attributed to the admission day.
+- `backend/tests/test_platform.py` skips under pytest when the live stack is down and raises when a section records a failure, so the live end-to-end sections cannot pass vacuously; as a script it still reports through PASS/FAIL lines and its exit code.
+- The M4 challenger pack asserts a specification divergence rather than hiding it: the sandbox binds `/usr` read-only plus `/etc/resolv.conf` and `/etc/ssl` only, so a sandboxed process can still write inside its private `/etc`. The benchmark report's earlier whole-`/etc` read-only claim was corrected, and the runner's deadline is 15 s with a 5 s kill grace, not 20 s.
 
 ## Outstanding qualification work
 

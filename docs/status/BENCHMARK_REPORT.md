@@ -34,7 +34,7 @@ The qualification suite comprehensively validated all functional, security, conc
 | **Audit Completeness & Outbox** | 100% queryable via LogsQL | Verified live with zero-loss replay | **PASS** |
 | **Disaster Recovery** | RTO < 4h, RPO < 24h | Cold staging restore sequence verified | **PASS** |
 
-**Final Assessment**: The platform satisfies the functional, operational, and security criteria exercised by the automated and live suites defined in `ORIGINAL_REQUEST.md` and [`../plans/DEVELOPMENT_PLAN.md`](../plans/DEVELOPMENT_PLAN.md). Read this decision together with the qualification scope in Addendum A.3: the automated evidence supports the benchmark result, not a production target-change certificate.
+**Final Assessment**: The platform satisfies the functional, operational, and security criteria exercised by the automated and live suites defined in the original brief (recorded in the ignored `.agents/teamwork/ORIGINAL_REQUEST.md` orchestration workspace) and [`../plans/DEVELOPMENT_PLAN.md`](../plans/DEVELOPMENT_PLAN.md). Read this decision together with the qualification scope in Addendum A.3: the automated evidence supports the benchmark result, not a production target-change certificate.
 
 ---
 
@@ -128,12 +128,9 @@ The platform implements multi-layered defense-in-depth isolation:
 
 ### 1. Unprivileged Bubblewrap Sandbox (`bwrap-runner.sh`)
 - **Namespaces**: Completely unshared Linux namespaces (`--unshare-all`, `--unshare-net`, `--unshare-pid`, `--unshare-ipc`, `--unshare-uts`).
-- **Read-Only System Binds**: Strict read-only mounts for system directories:
-  - `/usr` -> read-only
-  - `/bin` & `/lib` -> read-only
-  - `/etc` -> read-only (`--ro-bind /etc /etc`)
+- **Read-Only System Binds**: `/usr` is bound read-only (`--ro-bind /usr /usr`) and `/bin`, `/sbin`, `/lib` and `/lib64` are symlinks into it; `/etc/resolv.conf` and `/etc/ssl` are bound read-only when present (`--ro-bind-try`). **Correction:** an earlier revision of this report claimed a whole-`/etc` read-only bind; the runner does not mount `/etc` wholesale, so a sandboxed process can still create files in its private `/etc`. That divergence from the specification is asserted by `backend/tests/tier2_sandbox/test_m4_empirical_challenger.py::test_sandbox_etc_write_behavior_discrepancy` and is recorded in [security.md §3](../security.md#3-sandbox-and-resource-confinement).
 - **Capability Dropping**: Unconditionally drops all Linux capabilities (`--cap-drop ALL`). Execution as root or obtaining `setuid` privileges fails closed.
-- **Execution Deadlines**: Wrapped with 15s deadline / 20s SIGKILL (`timeout -k 20s 15s`). Hanging processes, infinite loops, and network hangs are terminated at 15s with exit code 124.
+- **Execution Deadlines**: Wrapped with a 15s deadline and a 5s kill grace (`timeout --kill-after=5s 15s`). Hanging processes, infinite loops, and network hangs are terminated at 15s with exit code 124.
 
 ### 2. Cgroups v2 Resource Ceilings
 - Per-job systemd user slice delegation enforcing hardware limits:
@@ -358,7 +355,7 @@ Before/after on the same host:
    a multi-worker Valkey integration run, a clean staging target deployment, a
    real owner-scored 30-task evaluation, a kernel-backed sandbox stress run, an
    event-by-event audit census, and a measured RTO/RPO drill remain open, as
-   stated in `TEST_READY.md`.
+   stated in [`TEST_READY.md`](TEST_READY.md).
 4. **Residual measurements not re-taken.** The 54.9 MB peak-RSS figure and the
    RTO/RPO drill numbers in the body were not re-measured in this session; they
    are reported as the M4 worker recorded them.

@@ -34,8 +34,8 @@ backend/
   installer_tui.py            configuration wizard (install.sh --tui)
   platform_tui.py             live dashboard
   services/
-    agent_runtime/            ReAct loop, parser, sessions, HTTP router, cancellation
-    agent_tools/              bounded tools, tool registry, audit, HTTP server
+    agent_runtime/            ReAct loop, parser, sessions, tool registry, HTTP router
+    agent_tools/              bounded tools, audit, HTTP server
     approval_gate/            destructive filter, HITL state machine, Valkey store
     auth_gateway/             ForwardAuth, quota/lease manager, P1 elevation, LiteLLM auth
     inference_engine/         OpenAI-compatible simulator / vLLM proxy
@@ -44,7 +44,7 @@ backend/
     hardware_survey.py        host inventory
   config/                     traefik, valkey, litellm, sandbox, seaweedfs, victorialogs, keys (local)
   tests/                      tiered pytest suites (see §6)
-  data/                       runbooks + runtime state (Git-ignored)
+  data/                       runbooks (tracked) + runtime state (Git-ignored)
   bin/                        downloaded static binaries (Git-ignored)
 
 packages/harness-integration/ DeepSeek Harness profile, plugin, multi-user gateway
@@ -91,8 +91,9 @@ per-user bearer keys from those files.
   and read back. Do not weaken it to make a test pass.
 - **The JS policy port must match** `backend/services/approval_gate/filter.py`
   action-for-action; the parity test enforces it.
-- **Generated directories are off limits**: `backend/bin`, `backend/data`,
-  `backend/logs`, `backend/run`, `backend/.venv`, `.pytest_cache`.
+- **Generated directories are off limits**: `backend/bin`, `backend/logs`,
+  `backend/run`, `backend/.venv`, `.pytest_cache`, and everything under
+  `backend/data/` except the tracked runbooks.
 - **Never fabricate evidence.** Report skips and environment limits explicitly;
   say "not measured" when it was not measured.
 - **Port 3080 must be free** for the agent platform. It is also the DeepSeek
@@ -103,7 +104,7 @@ per-user bearer keys from those files.
 
 | Task | Files |
 |---|---|
-| Add or change a bounded tool | `backend/services/agent_tools/tools.py`, `tool_registry.py`, `server.py`; tests in `tier1_unit`; doc in `docs/tools.md` |
+| Add or change a bounded tool | `backend/services/agent_tools/tools.py`, `backend/services/agent_runtime/tool_registry.py`, `backend/services/agent_tools/server.py`; tests in `tier1_unit`; doc in `docs/tools.md` |
 | Quota, lease, RPM/TPM or daily budget | `backend/services/auth_gateway/quota_manager.py` + `litellm_auth.py`; tests in `tier1_unit/test_quota_fail_closed.py`, `tier1_unit/test_daily_token_reservation.py`, `tier3_concurrency/` |
 | Approval flow or destructive filter | `backend/services/approval_gate/` (Python) **and** `packages/harness-integration/dsh-plugin-sysadmin/lib/policy.js` |
 | Target adapter action | `backend/services/target_adapter/config.py`, `adapter.py`, then `service_manager.py`/`config_deployer.py`; tests in `tier1_unit` + `tier3_concurrency` |
@@ -127,13 +128,15 @@ per-user bearer keys from those files.
 | Harness package | `make harness-test && make harness-verify` |
 | Anything user-visible | update `docs/` and record results in `docs/status/TEST_READY.md` |
 
-Baseline on the development host (2026-09-24): full suite **430 passed, 6
-skipped** with services stopped — the six skips are live ForwardAuth/Traefik
-checks that pass when the stack is up (**436 passed** with services running);
-tier 2 sandbox **129 passed** (including the 80-case M4 challenger pack);
-harness **19 node tests + 7/7 dsh checks**. Treat these as a regression
-baseline, not a production acceptance certificate, and record new measurements
-in `docs/status/TEST_READY.md`.
+Baseline on the development host (2026-09-24): with no live stack the suite
+collects **436 tests** and reports **423 passed, 13 skipped** — six live
+ForwardAuth/Traefik checks plus the seven `test_platform.py` sections, which
+skip when the stack is down and fail on any recorded error instead of passing
+silently. With the stack running those thirteen execute for real. Tier 2
+sandbox **129 passed** (including the 80-case M4 challenger pack); harness
+**19 node tests + 7/7 dsh checks**. Treat these as a regression baseline, not
+a production acceptance certificate, and record new measurements in
+`docs/status/TEST_READY.md`.
 
 ## 7. Environment notes
 

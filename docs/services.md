@@ -75,7 +75,7 @@ is identity-checked: a user may only cancel their own `request_id` or session.
 **Module:** `backend/services/agent_tools/`
 
 The tool implementations and their HTTP surface. See [tools.md](tools.md) for the
-tool reference and [security.md](security.md#path-confinement) for path rules.
+tool reference and [security.md](security.md#path-confinement-backend-tools) for path rules.
 
 - `tools.py` — `search_log_stream`, `config_lint_and_diff`,
   `doc_runbook_reader`, `execute_sandboxed_command`, plus path confinement.
@@ -208,7 +208,7 @@ backup with verification → `os.replace` atomic swap → post-deploy verificati
 automated rollback → success/audit retention.
 
 `TARGET_ADAPTER_SIMULATION=1` makes `ServiceManager` return simulated results
-without invoking `systemctl`. See [security.md](security.md#target-adapter) for
+without invoking `systemctl`. See [security.md](security.md#6-target-adapter) for
 the qualifications this component still needs.
 
 ---

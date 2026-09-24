@@ -9,10 +9,10 @@ approval — narrowly scoped service actions and staged configuration
 deployments. It is designed to run entirely on premises with no third-party
 cloud egress at runtime.
 
-The design intent comes from the six French specifications at the repository
-root. The implementation deliberately narrows or defers several of their claims;
-those differences are recorded in [security.md](security.md#known-gaps) and
-[development.md](development.md#deviations-from-the-design-specifications).
+The design intent comes from the six French specifications in
+[`specs/`](specs/README.md). The implementation deliberately narrows or defers several of their claims;
+those differences are recorded in [security.md](security.md#9-known-gaps) and
+[development.md](development.md#5-deviations-from-the-design-specifications).
 
 ## 2. Design principles
 

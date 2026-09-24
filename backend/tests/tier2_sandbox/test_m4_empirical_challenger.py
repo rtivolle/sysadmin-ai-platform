@@ -125,7 +125,8 @@ def test_sandbox_host_filesystem_escape_blocked(sandbox_workspace):
 def test_sandbox_etc_write_behavior_discrepancy(sandbox_workspace):
     """
     DISCREPANCY CHALLENGE:
-    BENCHMARK_REPORT.md claims /etc is mounted read-only via '--ro-bind /etc /etc'.
+    docs/status/BENCHMARK_REPORT.md claimed /etc is mounted read-only via
+    '--ro-bind /etc /etc' (corrected in that file on 2026-09-24).
     Empirical test reveals that bwrap-runner.sh only binds /etc/resolv.conf and /etc/ssl,
     so touching a new file in container /etc succeeds (code 0) rather than failing closed.
     Note: While this does NOT affect host /etc, it is a divergence from the documented claim.

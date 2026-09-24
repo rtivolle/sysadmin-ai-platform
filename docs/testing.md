@@ -110,4 +110,4 @@ historical restricted-workspace run; the current host results are in that file:
 7. Qualify the target adapter's privileged execution boundary and a clean
    staging target deployment.
 
-See [security.md](security.md#known-gaps) for the security framing.
+See [security.md](security.md#9-known-gaps) for the security framing.

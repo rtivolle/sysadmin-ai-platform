@@ -6,9 +6,16 @@ import os
 import sys
 import time
 import json
+import socket
+import functools
 import httpx
 import redis
 from pathlib import Path
+
+try:
+    import pytest
+except ImportError:  # the file is also run directly by ./platform.sh test
+    pytest = None
 
 PASS = "\033[32m[PASS]\033[0m"
 FAIL = "\033[31m[FAIL]\033[0m"
@@ -332,6 +339,73 @@ def test_traefik_gateway():
     except Exception as e:
         print(f"{FAIL} Traefik error: {e}")
         errors += 1
+
+# ---------------------------------------------------------------------------
+# pytest integration
+#
+# This file is both the "./platform.sh test" script and a pytest module. As a
+# script it reports through the PASS/FAIL lines and the exit code. Under pytest
+# it must stay honest: skip when the live stack is not running, and fail when a
+# section records a failure instead of passing because the failure was only
+# printed.
+# ---------------------------------------------------------------------------
+
+REQUIRED_STACK_PORTS = {
+    6379: "valkey",
+    9428: "victorialogs",
+    8333: "seaweedfs",
+    8000: "inference",
+    3081: "auth_gateway",
+    3080: "agent_tools",
+    4000: "litellm",
+    8080: "traefik",
+}
+
+
+def missing_stack_ports() -> list:
+    missing = []
+    for port, _service in REQUIRED_STACK_PORTS.items():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                missing.append(port)
+    return missing
+
+
+def _fail_on_recorded_error(fn):
+    """Turn a printed section failure into a pytest failure."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        before = errors
+        fn(*args, **kwargs)
+        assert errors == before, f"{fn.__name__}: one or more platform checks failed (see output above)"
+
+    return wrapper
+
+
+if pytest is not None and "pytest" in sys.modules:
+    _missing_ports = missing_stack_ports()
+    if _missing_ports:
+        pytestmark = pytest.mark.skip(
+            reason=(
+                "live platform stack is not running (ports down: "
+                + ", ".join(str(port) for port in _missing_ports)
+                + "); run ./platform.sh test"
+            )
+        )
+    else:
+        for _name in (
+            "test_valkey",
+            "test_victorialogs",
+            "test_seaweedfs",
+            "test_inference_engine",
+            "test_auth_gateway",
+            "test_agent_tools_and_security",
+            "test_traefik_gateway",
+        ):
+            globals()[_name] = _fail_on_recorded_error(globals()[_name])
+
 
 def main():
     print("================================================================")

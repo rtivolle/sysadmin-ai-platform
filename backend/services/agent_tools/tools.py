@@ -93,7 +93,7 @@ def validate_path_confinement(
     if "logs" in allowed_categories:
         allowed_roots.extend([LOGS_DIR, "/var/log", FIXTURES_DIR, os.path.join(FIXTURES_DIR, "logs")])
     if "runbooks" in allowed_categories:
-        allowed_roots.extend([RUNBOOKS_DIR, os.path.join(PROJECT_ROOT, "docs/runbooks"), FIXTURES_DIR, os.path.join(FIXTURES_DIR, "runbooks")])
+        allowed_roots.extend([RUNBOOKS_DIR, FIXTURES_DIR, os.path.join(FIXTURES_DIR, "runbooks")])
     if "configs" in allowed_categories:
         allowed_roots.extend([
             CONFIG_DIR, RUNBOOKS_DIR, FIXTURES_DIR,
