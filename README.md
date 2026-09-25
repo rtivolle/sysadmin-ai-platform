@@ -13,6 +13,8 @@ It provides:
 
 > **Status: prototype.** The target adapter privileged boundary and staging deployment are not yet production-qualified. See [`docs/status/TEST_READY.md`](docs/status/TEST_READY.md) for current verification scope and limits.
 
+**Contributors and agents:** read [`AGENTS.md`](AGENTS.md) first for repository guardrails, required verification matrix, and coordination rules.
+
 ## Quick start
 
 ```bash
