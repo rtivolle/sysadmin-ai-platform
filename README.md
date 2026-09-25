@@ -48,7 +48,7 @@ Optional install modes:
 - LiteLLM (`127.0.0.1:4000`)
 - Traefik (`:8080/:8443`)
 
-Harness gateway is opt-in (`./platform.sh harness`) and binds `:3085`.
+Harness integration is optional; see [`docs/harness-integration.md`](docs/harness-integration.md).
 
 ## Golden commands
 
@@ -63,8 +63,13 @@ make test
 make test-live
 make benchmark
 make harness-test
-make harness-verify
 make compile
+```
+
+Harness wiring verification can be run directly with:
+
+```bash
+node packages/harness-integration/scripts/verify-harness.mjs
 ```
 
 ## Core components
