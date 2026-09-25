@@ -32,7 +32,7 @@ make compile
 Harness verification script:
 
 ```bash
-node packages/harness-integration/scripts/verify-live-gateway.mjs
+node ./packages/harness-integration/scripts/verify-live-gateway.mjs
 ```
 
 Equivalent direct commands (examples):
@@ -66,5 +66,5 @@ After changing:
 - **Runtime/quota/approval/adapter**: Tier 1 + Tier 3
 - **Sandbox/workspace isolation**: Tier 2
 - **Audit/outbox/backup/restore**: Tier 4
-- **Harness integration**: `make harness-test` + `make harness-verify` (or `node packages/harness-integration/scripts/verify-live-gateway.mjs`)
+- **Harness integration**: `make harness-test` + `make harness-verify` (or `node ./packages/harness-integration/scripts/verify-live-gateway.mjs`)
 - **User-visible docs or claims**: update corresponding docs and `status/TEST_READY.md` evidence where applicable

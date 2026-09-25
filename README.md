@@ -70,7 +70,7 @@ make compile
 Harness wiring verification can be run directly with:
 
 ```bash
-node packages/harness-integration/scripts/verify-live-gateway.mjs
+node ./packages/harness-integration/scripts/verify-live-gateway.mjs
 ```
 
 ## Core components
