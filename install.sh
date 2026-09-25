@@ -54,7 +54,8 @@ if [ "${1:-}" = "--tui" ] || [ "${1:-}" = "-i" ]; then
   if [ ! -x "$VENV_PYTHON" ]; then
     echo "Bootstrapping environment for TUI wizard..."
     python3 -m venv "${VENV_DIR}"
-    "${VENV_DIR}/bin/pip" install -q "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic rich huggingface_hub
+    "${VENV_DIR}/bin/pip" install -q --disable-pip-version-check --upgrade pip
+    "${VENV_DIR}/bin/pip" install -q --disable-pip-version-check "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic rich huggingface_hub
   fi
   shift
   exec "$VENV_PYTHON" "${BACKEND_DIR}/installer_tui.py" "$@"
@@ -450,14 +451,34 @@ else
   fi
 
   echo "  [+] Checking / updating required python packages..."
-  "${VENV_DIR}/bin/pip" install -q --prefer-binary \
+  "${VENV_DIR}/bin/pip" install -q --disable-pip-version-check --upgrade pip
+  "${VENV_DIR}/bin/pip" install -q --disable-pip-version-check --prefer-binary \
     "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic huggingface_hub
   echo "  [+] Python dependencies verified."
   if { [ "$ROLE" = "all" ] || [ "$ROLE" = "inference" ]; } && [ "$SKIP_VLLM" = 0 ]; then
     echo "  [+] Installing vLLM in an isolated Python 3.12 environment..."
     # vLLM bundles compiled CUDA/PyTorch components; keep them separate from
     # the platform's service environment to avoid dependency conflicts.
-    "${VENV_DIR}/bin/pip" install -q --prefer-binary uv
+    "${VENV_DIR}/bin/pip" install -q --disable-pip-version-check --prefer-binary uv
+
+    # Determine uv link mode to avoid cross-device hardlink failures.
+    # In container or cloud environments (e.g. Azure / Codespaces), ~/.cache and /workspaces
+    # reside on different filesystems where hardlinks fail (EXDEV). Test if hardlinks work
+    # between uv's cache and the target venv; if not, automatically fall back to copy mode.
+    if [ -z "${UV_LINK_MODE:-}" ]; then
+      UV_CACHE_PATH="$("${VENV_DIR}/bin/uv" cache dir 2>/dev/null || echo "${HOME}/.cache/uv")"
+      mkdir -p "$UV_CACHE_PATH" "${VLLM_VENV_DIR}"
+      _PROBE_CACHE="${UV_CACHE_PATH}/.probe_link_$$"
+      _PROBE_TARGET="${VLLM_VENV_DIR}/.probe_link_$$"
+      touch "$_PROBE_CACHE" 2>/dev/null || true
+      if [ -f "$_PROBE_CACHE" ]; then
+        if ! ln "$_PROBE_CACHE" "$_PROBE_TARGET" 2>/dev/null; then
+          export UV_LINK_MODE="copy"
+        fi
+        rm -f "$_PROBE_CACHE" "$_PROBE_TARGET" 2>/dev/null || true
+      fi
+    fi
+
     if [ ! -x "${VLLM_VENV_DIR}/bin/python" ]; then
       "${VENV_DIR}/bin/uv" venv --python 3.12 --seed --managed-python "${VLLM_VENV_DIR}"
     fi
