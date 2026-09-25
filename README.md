@@ -48,6 +48,8 @@ Optional install modes:
 - LiteLLM (`127.0.0.1:4000`)
 - Traefik (`:8080/:8443`)
 
+This is the intended default stack; ensure the agent port (`3080`) is free before startup.
+
 Harness integration is optional; see [`docs/harness-integration.md`](docs/harness-integration.md).
 
 ## Golden commands

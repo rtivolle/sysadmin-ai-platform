@@ -65,6 +65,7 @@ After changing:
 - **Runtime/quota/approval/adapter**: Tier 1 + Tier 3 (`backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit backend/tests/tier3_concurrency -q`)
 - **Sandbox/workspace isolation**: Tier 2
 - **Audit/outbox/backup/restore**: Tier 4 (`backend/.venv/bin/python3 -m pytest backend/tests/tier4_recovery -q`)
+- **Service wiring / ports / Traefik routes**: `make start && make test-live`
 - **Harness integration**: `make harness-test` + `make harness-verify`
 - **Compile sanity check**: `make compile`
 - **User-visible docs or claims**: update corresponding docs and `status/TEST_READY.md` evidence where applicable
