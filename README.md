@@ -58,7 +58,6 @@ make install
 make start
 make stop
 make status
-make logs SERVICE=agent_tools
 make test
 make test-live
 make benchmark
