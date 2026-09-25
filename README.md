@@ -96,6 +96,7 @@ Harness verification is covered by `make harness-test` and `make harness-verify`
 - Workspaces are server-assigned `0700`; client-selected paths/symlinks are rejected.
 - Quota/approval/P1 state fails closed when required shared state is unavailable.
 - Sandbox execution aborts if cgroup limits cannot be installed/read back.
+- Arbitrary privileged shell access and direct production mutations are out of scope for this prototype.
 - Secrets remain in `backend/config/keys/*` and are Git-ignored.
 
 ## Documentation map
