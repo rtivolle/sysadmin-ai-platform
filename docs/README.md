@@ -4,9 +4,9 @@ This directory documents the implementation in this repository.
 
 Primary entry points:
 
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/README.md` — project overview and quick start
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/AGENTS.md` — contributor/agent operating guide, guardrails, verification matrix
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/status/TEST_READY.md` — latest measured verification evidence and limits
+- [`../README.md`](../README.md) — project overview and quick start
+- [`../AGENTS.md`](../AGENTS.md) — contributor/agent operating guide, guardrails, verification matrix
+- [`status/TEST_READY.md`](status/TEST_READY.md) — latest measured verification evidence and limits
 
 > **Status reminder:** this is a prototype and is not yet qualified for production target mutations.
 

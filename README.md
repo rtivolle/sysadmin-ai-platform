@@ -11,7 +11,7 @@ It provides:
 - a Bubblewrap + cgroups v2 execution sandbox,
 - durable audit delivery to VictoriaLogs.
 
-> **Status: prototype.** The target adapter privileged boundary and staging deployment are not yet production-qualified. See `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/status/TEST_READY.md` for current verification scope and limits.
+> **Status: prototype.** The target adapter privileged boundary and staging deployment are not yet production-qualified. See [`docs/status/TEST_READY.md`](docs/status/TEST_READY.md) for current verification scope and limits.
 
 ## Quick start
 
@@ -88,12 +88,12 @@ make compile
 
 ## Documentation map
 
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/AGENTS.md` — repository map, guardrails, test matrix
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/README.md` — documentation index
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/architecture.md` — architecture and trust boundaries
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/services.md` — backend service reference
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/security.md` — security model and open gaps
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/http-api.md` — HTTP endpoints
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/operations.md` — install/run/troubleshooting
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/testing.md` — test tiers and execution guidance
-- `/home/runner/work/sysadmin-ai-platform/sysadmin-ai-platform/docs/status/TEST_READY.md` — latest measured verification
+- [`AGENTS.md`](AGENTS.md) — repository map, guardrails, test matrix
+- [`docs/README.md`](docs/README.md) — documentation index
+- [`docs/architecture.md`](docs/architecture.md) — architecture and trust boundaries
+- [`docs/services.md`](docs/services.md) — backend service reference
+- [`docs/security.md`](docs/security.md) — security model and open gaps
+- [`docs/http-api.md`](docs/http-api.md) — HTTP endpoints
+- [`docs/operations.md`](docs/operations.md) — install/run/troubleshooting
+- [`docs/testing.md`](docs/testing.md) — test tiers and execution guidance
+- [`docs/status/TEST_READY.md`](docs/status/TEST_READY.md) — latest measured verification
