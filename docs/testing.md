@@ -34,6 +34,8 @@ Harness verification script:
 node ./packages/harness-integration/scripts/verify-live-gateway.mjs
 ```
 
+Run this live gateway verifier with the backend stack running (for example after `make start`).
+
 Equivalent direct commands (examples):
 
 ```bash

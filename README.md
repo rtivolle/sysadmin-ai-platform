@@ -50,12 +50,12 @@ Optional install modes:
 - Valkey (`127.0.0.1:6379`)
 - VictoriaLogs (`127.0.0.1:9428`)
 - audit outbox worker
-- SeaweedFS (`8333/9333/8888`)
+- SeaweedFS (`127.0.0.1:8333/9333/8888`)
 - inference engine (`127.0.0.1:8000`)
 - auth gateway / ForwardAuth (`127.0.0.1:3081`)
 - agent platform (`127.0.0.1:3080`)
 - LiteLLM (`127.0.0.1:4000`)
-- Traefik (`:8080/:8443`)
+- Traefik (`127.0.0.1:8080/8443`)
 
 This is the intended default stack; ensure the agent port (`3080` by default, override with `SYSADMIN_AGENT_PORT`) is free before startup.
 
