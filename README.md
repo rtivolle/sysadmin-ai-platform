@@ -44,7 +44,7 @@ Optional install modes:
 - SeaweedFS (`8333/9333/8888`)
 - inference engine (`127.0.0.1:8000`)
 - auth gateway / ForwardAuth (`127.0.0.1:3081`)
-- agent platform (default `127.0.0.1:3080`, configurable via `SYSADMIN_AGENT_PORT`)
+- agent platform (`127.0.0.1:3080`)
 - LiteLLM (`127.0.0.1:4000`)
 - Traefik (`:8080/:8443`)
 
