@@ -66,9 +66,10 @@ make harness-verify
 make compile
 ```
 
-Harness wiring verification can be run directly with:
+Harness verification should include both package tests and live gateway checks:
 
 ```bash
+node --test ./packages/harness-integration/tests/
 node ./packages/harness-integration/scripts/verify-live-gateway.mjs
 ```
 
