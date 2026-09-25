@@ -66,6 +66,9 @@ export function loadConfig(env = process.env) {
 
     sessionTtlMs: toInt(env.SYSADMIN_SESSION_TTL_MS, 86_400_000),
     cookieName: env.SYSADMIN_GATEWAY_COOKIE ?? 'sysadmin_gateway',
+    secureCookies: !['0', 'false', 'no', 'off'].includes(
+      String(env.SYSADMIN_COOKIE_SECURE ?? 'true').trim().toLowerCase(),
+    ),
     adminTtlMs: toInt(env.SYSADMIN_ADMIN_TTL_MS, 12 * 3_600_000),
     adminCookieName: env.SYSADMIN_ADMIN_COOKIE ?? 'sysadmin_admin',
 

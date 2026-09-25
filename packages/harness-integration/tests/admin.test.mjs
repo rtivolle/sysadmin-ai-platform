@@ -187,16 +187,45 @@ test('serves the Mila-branded admin page, login page and assets', async () => {
   assert.match(html, /mila\.quebec/)
   assert.match(html, /\/assets\/mila-logo\.png/)
   assert.match(html, /[Cc]onsole/)
+  assert.match(html, /<meta name="color-scheme" content="light dark">/)
+  assert.match(html, /<dialog id="confirm-dialog"[^>]*closedby="any"/)
+  assert.match(html, /<dialog id="model-params-dialog"[^>]*closedby="any"/)
 
   const login = await fetch(`${gatewayUrl}/api/gateway/login`)
   assert.equal(login.status, 200)
   const loginHtml = await login.text()
   assert.match(loginHtml, /mila\.quebec/)
   assert.match(loginHtml, /\/assets\/mila-logo\.png/)
+  assert.match(loginHtml, /<meta name="color-scheme" content="light dark">/)
 
   const css = await fetch(`${gatewayUrl}/assets/brand.css`)
   assert.equal(css.status, 200)
   assert.match(css.headers.get('content-type'), /text\/css/)
+  const cssText = await css.text()
+  assert.match(cssText, /color-scheme:\s*light dark/)
+  assert.match(cssText, /prefers-color-scheme:\s*dark/)
+  assert.match(cssText, /light-dark\(/)
+  assert.match(cssText, /:user-invalid/)
+  assert.match(cssText, /:user-valid/)
+  assert.match(cssText, /--mila-danger-button/)
+  assert.match(cssText, /prefers-reduced-motion:\s*reduce/)
+
+  const adminCss = await fetch(`${gatewayUrl}/admin-ui.css`)
+  assert.equal(adminCss.status, 200)
+  const adminCssText = await adminCss.text()
+  assert.match(adminCssText, /view-transition-name:\s*tab-content/)
+  assert.match(adminCssText, /::view-transition-old\(tab-content\)/)
+  assert.match(adminCssText, /::view-transition-new\(tab-content\)/)
+  assert.match(adminCssText, /@supports\s*\(view-transition-name:\s*tab-content\)/)
+
+  const adminJs = await fetch(`${gatewayUrl}/admin-ui.js`)
+  assert.equal(adminJs.status, 200)
+  const jsText = await adminJs.text()
+  assert.match(jsText, /document\.startViewTransition/)
+  assert.match(jsText, /enableDialogBackdropDismiss/)
+  assert.match(jsText, /syncAriaInvalid/)
+  assert.match(jsText, /mouseDownOnBackdrop/)
+
   const logo = await fetch(`${gatewayUrl}/assets/mila-logo.png`)
   assert.equal(logo.status, 200)
   assert.match(logo.headers.get('content-type'), /image\/png/)
@@ -503,5 +532,30 @@ test('probes the inference engine on the host that runs it', () => {
   const config = loadConfig(env)
   assert.equal(config.services.inference.local, true)
   assert.equal(config.services.inference.port, 8123)
+})
+
+test('modern web guidance: verifies dialog dismissal, CSS cascade and form accessibility', async () => {
+  const adminCss = await fetch(`${gatewayUrl}/admin-ui.css`)
+  const adminCssText = await adminCss.text()
+
+  // Ensure .mila-panel comes BEFORE @supports so @supports animation: none overrides it
+  const panelIndex = adminCssText.indexOf('.mila-panel {')
+  const supportsIndex = adminCssText.indexOf('@supports (view-transition-name: tab-content)')
+  assert.ok(panelIndex !== -1, '.mila-panel rule must exist')
+  assert.ok(supportsIndex !== -1, '@supports view-transition rule must exist')
+  assert.ok(panelIndex < supportsIndex, '.mila-panel must be defined before @supports to prevent cascade override')
+
+  // Verify dark mode danger button contrast token
+  const brandCss = await fetch(`${gatewayUrl}/assets/brand.css`)
+  const brandCssText = await brandCss.text()
+  assert.match(brandCssText, /--mila-danger-button:\s*#dc2626/)
+  assert.match(brandCssText, /--mila-danger-button:\s*light-dark\(var\(--mila-danger\),\s*#dc2626\)/)
+
+  // Verify JS dialog dismiss handles mousedown drag protection
+  const adminJs = await fetch(`${gatewayUrl}/admin-ui.js`)
+  const jsText = await adminJs.text()
+  assert.match(jsText, /mouseDownOnBackdrop/)
+  assert.match(jsText, /_hasBackdropDismiss/)
+  assert.match(jsText, /document\.addEventListener\('invalid'/)
 })
 

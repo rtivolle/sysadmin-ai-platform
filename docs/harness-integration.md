@@ -110,7 +110,7 @@ harness:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SYSADMIN_GATEWAY_HOST` / `_PORT` | `127.0.0.1` / `3085` | Gateway bind address. |
+| `SYSADMIN_GATEWAY_HOST` / `_PORT` | `127.0.0.1` / `3085` | Gateway bind address. Keep loopback when Cloudflare Tunnel runs on the same host. |
 | `SYSADMIN_AUTH_URL` | `http://127.0.0.1:3081` | Platform auth gateway. |
 | `SYSADMIN_BACKEND_URL` | `http://127.0.0.1:3080` | Agent platform. |
 | `SYSADMIN_LITELLM_URL` | `http://127.0.0.1:4000/v1` | LiteLLM gateway. |
@@ -142,6 +142,8 @@ harness:
 | `DSH_BIN` | `dsh` | Harness executable. |
 | `SYSADMIN_PROFILE` | `sysadmin` | Profile name. |
 | `SYSADMIN_GATEWAY_COOKIE` | `sysadmin_gateway` | Cookie name. |
+| `SYSADMIN_COOKIE_SECURE` | `true` | Add the `Secure` attribute to gateway session cookies (set `false` only for local HTTP development). |
+| `SYSADMIN_TRUSTED_HOSTS` | empty | Comma-separated host authorities accepted by each DSH instance; include the public gateway hostname (for example, `mila-ag.ca`). |
 | `SYSADMIN_SESSION_TTL_MS` | `86400000` | Session lifetime. |
 | `SYSADMIN_INSTANCE_READY_TIMEOUT_MS` | `60000` | Instance startup timeout. |
 
@@ -314,6 +316,30 @@ approval-gated and audited there.
   authority.
 
 ## 5. Running and testing
+
+### Public Cloudflare hostnames
+
+For the two-hostname deployment, publish `mila-ag.ca` through a Cloudflare
+Tunnel to the loopback Harness gateway (`http://127.0.0.1:3085`). Keep the
+gateway bound to loopback and do not publish per-user DSH ports (`3180–3280`).
+Set `SYSADMIN_TRUSTED_HOSTS=mila-ag.ca` so DSH accepts the HTTPS browser Host
+and Origin forwarded by the gateway. Gateway session cookies are Secure by
+default and remain same-origin because the login page and Harness UI both use
+`mila-ag.ca`.
+
+The gateway also serves its operator console at `/admin`; the hostname route
+therefore makes that path Internet-reachable, though it still requires the
+master-key login. Before production exposure, restrict `/admin` at the edge
+(for example with Cloudflare Access) or configure an independent management
+hostname and Access policy. Do not expose this hostname until that restriction
+is in place.
+
+Keep `mila-api.ca` separate. Do not point it at the existing general Traefik
+listener unchanged: that listener also routes LiteLLM, S3 and audit paths. A
+dedicated, explicitly allow-listed API route should be prepared before the API
+hostname is published. The Harness plugin talks to backend services from the
+on-prem gateway/DSH processes, so browser CORS between `mila-ag.ca` and
+`mila-api.ca` is not needed for the current design.
 
 `platform.sh` starts the gateway, and the `service` subcommand starts, stops or
 restarts any individual service the admin console offers:

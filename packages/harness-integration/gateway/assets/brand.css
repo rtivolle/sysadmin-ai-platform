@@ -8,7 +8,11 @@
  * layout lives in admin-ui.css.
  */
 :root {
-  /* Palette */
+  /* Automatically adapt native UI controls and scrollbars to user system preferences */
+  color-scheme: light dark;
+  accent-color: var(--mila-blue);
+
+  /* Palette (light mode defaults / fallback) */
   --mila-blue: #003cc5;
   --mila-blue-dark: #00309e;
   --mila-blue-soft: #eef2fd;
@@ -28,6 +32,12 @@
   --mila-ok-soft: #e2f3e7;
   --mila-warn: #9a6700;
   --mila-warn-soft: #fdf0d8;
+  --mila-on-accent: #ffffff;
+  --mila-danger-button: var(--mila-danger);
+  --mila-code-bg: #f0f1f6;
+  --mila-badge-bg: #eceef5;
+  --mila-skeleton-bg: #eceef5;
+  --mila-dialog-backdrop: rgba(35, 36, 44, 0.45);
 
   /* Spacing (8px grid) and shape */
   --mila-space-1: 0.25rem;
@@ -50,6 +60,70 @@
   --mila-text-xs: 0.76rem;
 
   --mila-transition: 160ms ease;
+}
+
+/* MANDATORY: Fallback for browsers without light-dark() support */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mila-blue: #4d82f7;
+    --mila-blue-dark: #386fe8;
+    --mila-blue-soft: #18233c;
+    --mila-blue-tint: #203154;
+    --mila-slate: #d2d6e4;
+    --mila-ink: #f3f5fa;
+    --mila-muted: #9398a8;
+    --mila-faint: #686d7e;
+    --mila-line: #272b37;
+    --mila-line-strong: #3c4254;
+    --mila-bg: #0e1017;
+    --mila-surface: #161922;
+    --mila-surface-2: #1d212d;
+    --mila-danger: #f87171;
+    --mila-danger-soft: #371b1d;
+    --mila-danger-button: #dc2626;
+    --mila-ok: #4ade80;
+    --mila-ok-soft: #132c1c;
+    --mila-warn: #fbbf24;
+    --mila-warn-soft: #352910;
+    --mila-code-bg: #222634;
+    --mila-badge-bg: #242836;
+    --mila-skeleton-bg: #242836;
+    --mila-dialog-backdrop: rgba(0, 0, 0, 0.65);
+    --mila-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --mila-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 10px 24px -14px rgba(0, 0, 0, 0.65);
+  }
+}
+
+/* Modern light-dark() CSS color function for element-level and root adaptation */
+@supports (color: light-dark(white, black)) {
+  :root {
+    --mila-blue: light-dark(#003cc5, #4d82f7);
+    --mila-blue-dark: light-dark(#00309e, #386fe8);
+    --mila-blue-soft: light-dark(#eef2fd, #18233c);
+    --mila-blue-tint: light-dark(#dde6fb, #203154);
+    --mila-slate: light-dark(#353641, #d2d6e4);
+    --mila-ink: light-dark(#23242c, #f3f5fa);
+    --mila-muted: light-dark(#6b6c78, #9398a8);
+    --mila-faint: light-dark(#8b8c98, #686d7e);
+    --mila-line: light-dark(#e2e3ea, #272b37);
+    --mila-line-strong: light-dark(#cbd0dd, #3c4254);
+    --mila-bg: light-dark(#f5f6fa, #0e1017);
+    --mila-surface: light-dark(#ffffff, #161922);
+    --mila-surface-2: light-dark(#fafbfe, #1d212d);
+    --mila-danger: light-dark(#b3261e, #f87171);
+    --mila-danger-soft: light-dark(#fbe6e4, #371b1d);
+    --mila-danger-button: light-dark(var(--mila-danger), #dc2626);
+    --mila-ok: light-dark(#1c7a3d, #4ade80);
+    --mila-ok-soft: light-dark(#e2f3e7, #132c1c);
+    --mila-warn: light-dark(#9a6700, #fbbf24);
+    --mila-warn-soft: light-dark(#fdf0d8, #352910);
+    --mila-code-bg: light-dark(#f0f1f6, #222634);
+    --mila-badge-bg: light-dark(#eceef5, #242836);
+    --mila-skeleton-bg: light-dark(#eceef5, #242836);
+    --mila-dialog-backdrop: light-dark(rgba(35, 36, 44, 0.45), rgba(0, 0, 0, 0.65));
+    --mila-shadow-sm: light-dark(0 1px 2px rgba(35, 36, 44, 0.06), 0 1px 2px rgba(0, 0, 0, 0.35));
+    --mila-shadow: light-dark(0 1px 3px rgba(35, 36, 44, 0.08), 0 10px 24px -14px rgba(35, 36, 44, 0.22), 0 1px 3px rgba(0, 0, 0, 0.4), 0 10px 24px -14px rgba(0, 0, 0, 0.65));
+  }
 }
 
 * {
@@ -170,7 +244,7 @@ a {
   border: 1px solid transparent;
   border-radius: var(--mila-radius-sm);
   background: var(--mila-blue);
-  color: var(--mila-surface);
+  color: var(--mila-on-accent);
   padding: 0.52rem 0.95rem;
   font-size: 0.9rem;
   font-weight: 600;
@@ -222,12 +296,12 @@ a {
 }
 
 .mila-button.danger {
-  background: var(--mila-danger);
-  color: var(--mila-surface);
+  background: var(--mila-danger-button, var(--mila-danger));
+  color: var(--mila-on-accent);
 }
 
 .mila-button.danger:hover:not(:disabled) {
-  background: #94201a;
+  background: color-mix(in srgb, var(--mila-danger-button, var(--mila-danger)) 85%, black);
 }
 
 .mila-button.danger.ghost {
@@ -277,6 +351,35 @@ a {
   color: var(--mila-muted);
 }
 
+/* ── Modern form interaction feedback (:user-invalid / :user-valid) ────── */
+
+.mila-input:user-invalid {
+  border-color: var(--mila-danger);
+  background: var(--mila-danger-soft);
+}
+
+.mila-input:user-invalid:focus {
+  outline: 2px solid var(--mila-danger);
+  outline-offset: 0;
+  border-color: var(--mila-danger);
+}
+
+.mila-input:required:user-valid,
+.mila-input[pattern]:user-valid,
+.mila-input[min]:user-valid,
+.mila-input[max]:user-valid {
+  border-color: var(--mila-ok);
+}
+
+.mila-input:required:user-valid:focus,
+.mila-input[pattern]:user-valid:focus,
+.mila-input[min]:user-valid:focus,
+.mila-input[max]:user-valid:focus {
+  outline: 2px solid var(--mila-ok);
+  outline-offset: 0;
+  border-color: var(--mila-ok);
+}
+
 select.mila-input {
   cursor: pointer;
 }
@@ -317,7 +420,8 @@ select.mila-input {
 code {
   font-family: var(--mila-mono);
   font-size: 0.82em;
-  background: #f0f1f6;
+  background: var(--mila-code-bg);
+  color: var(--mila-ink);
   border-radius: 4px;
   padding: 0.05rem 0.3rem;
 }
@@ -332,7 +436,7 @@ code {
   padding: 0.1rem 0.55rem;
   font-size: 0.72rem;
   font-weight: 600;
-  background: #eceef5;
+  background: var(--mila-badge-bg);
   color: var(--mila-slate);
   white-space: nowrap;
 }
@@ -422,6 +526,7 @@ code {
 /* ── Log viewer ─────────────────────────────────────────────────────────── */
 
 .mila-log {
+  color-scheme: dark;
   background: #10131a;
   color: #d8dee9;
   border-radius: var(--mila-radius);
@@ -460,7 +565,7 @@ code {
 .mila-skeleton {
   position: relative;
   overflow: hidden;
-  background: #eceef5;
+  background: var(--mila-skeleton-bg);
   border-radius: var(--mila-radius-sm);
   min-height: 1em;
 }
@@ -470,7 +575,7 @@ code {
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--mila-surface) 65%, transparent), transparent);
   animation: mila-shimmer 1.4s infinite;
 }
 
@@ -581,6 +686,7 @@ code {
 /* ── Dialog ─────────────────────────────────────────────────────────────── */
 
 .mila-dialog {
+  background: var(--mila-surface);
   border: 1px solid var(--mila-line);
   border-radius: var(--mila-radius-lg);
   box-shadow: var(--mila-shadow);
@@ -590,7 +696,7 @@ code {
 }
 
 .mila-dialog::backdrop {
-  background: rgba(35, 36, 44, 0.45);
+  background: var(--mila-dialog-backdrop);
 }
 
 .mila-dialog h2 {
@@ -635,7 +741,10 @@ code {
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
-  *::after {
+  *::after,
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

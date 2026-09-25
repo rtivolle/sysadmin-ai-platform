@@ -264,6 +264,48 @@ function setError(message) {
   }
 }
 
+// ── Dialog backdrop dismissal ────────────────────────────────────────────────
+
+function enableDialogBackdropDismiss(dialog, onDismiss) {
+  if (!dialog || dialog._hasBackdropDismiss) return
+  dialog._hasBackdropDismiss = true
+  // Modern browsers with closedby support handle backdrop clicks natively.
+  // For other browsers, install a backdrop click listener on the dialog element.
+  if (typeof HTMLDialogElement === 'undefined' || !('closedBy' in HTMLDialogElement.prototype)) {
+    let mouseDownOnBackdrop = false
+    dialog.addEventListener('mousedown', (event) => {
+      if (event.target !== dialog) {
+        mouseDownOnBackdrop = false
+        return
+      }
+      const rect = dialog.getBoundingClientRect()
+      mouseDownOnBackdrop = (
+        event.clientY < rect.top ||
+        event.clientY > rect.bottom ||
+        event.clientX < rect.left ||
+        event.clientX > rect.right
+      )
+    })
+    dialog.addEventListener('click', (event) => {
+      if (!dialog.open || event.target !== dialog || !mouseDownOnBackdrop) return
+      const rect = dialog.getBoundingClientRect()
+      const isInside = (
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width
+      )
+      if (!isInside) {
+        if (typeof onDismiss === 'function') {
+          onDismiss()
+        } else {
+          dialog.close()
+        }
+      }
+    })
+  }
+}
+
 // ── Confirm dialog ───────────────────────────────────────────────────────────
 
 function confirmDialog({ title, message, confirmLabel = 'Confirmer', danger = true, extraLabel }) {
@@ -299,6 +341,7 @@ function confirmDialog({ title, message, confirmLabel = 'Confirmer', danger = tr
     okButton.onclick = () => finish(true)
     $('confirm-cancel').onclick = () => finish(false)
     dialog.oncancel = () => finish(false)
+    dialog.onclose = () => finish(false)
     dialog.showModal()
   })
 }
@@ -426,16 +469,43 @@ function syncTabUI() {
   }
 }
 
-function activateTab(tab, { render = true } = {}) {
+function activateTab(tab, { render = true, transition = true } = {}) {
   if (!TABS.includes(tab)) tab = 'overview'
   const changed = state.activeTab !== tab
-  state.activeTab = tab
-  syncTabUI()
-  if (changed) {
+  if (!changed) {
+    if (render) refreshActive()
+    return
+  }
+
+  const applyChange = () => {
+    state.activeTab = tab
+    syncTabUI()
     setError('')
     if (tab !== 'instances') stopLogPolling()
+    if (render) refreshActive()
+
+    // Route focus to the active tab panel if focus was abandoned or not in the nav list
+    const activeEl = document.activeElement
+    const tabsNav = $('tabs')
+    if (!activeEl || activeEl === document.body || (tabsNav && !tabsNav.contains(activeEl))) {
+      const panel = $(`tab-${tab}`)
+      if (panel && typeof panel.focus === 'function') {
+        panel.focus()
+      }
+    }
   }
-  if (render) refreshActive()
+
+  if (
+    transition &&
+    typeof document.startViewTransition === 'function' &&
+    !(typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  ) {
+    document.startViewTransition(() => {
+      applyChange()
+    })
+  } else {
+    applyChange()
+  }
 }
 
 function goTo(tab) {
@@ -1173,6 +1243,7 @@ async function openModelParamsDialog(model) {
 
 function bindModelParamsDialog() {
   const dialog = $('model-params-dialog')
+  enableDialogBackdropDismiss(dialog)
   $('model-params-cancel').addEventListener('click', () => dialog.close())
   $('model-params-form').addEventListener('submit', async (event) => {
     event.preventDefault()
@@ -1592,12 +1663,42 @@ RENDERERS.approvals = renderApprovals
 RENDERERS.services = renderServices
 RENDERERS.hardware = renderHardware
 
+// ── Form validation feedback & accessibility ────────────────────────────────
+
+function syncAriaInvalid(el) {
+  if (!el || typeof el.matches !== 'function') return
+  try {
+    if (el.matches(':user-invalid')) {
+      el.setAttribute('aria-invalid', 'true')
+    } else if (el.matches(':user-valid')) {
+      el.removeAttribute('aria-invalid')
+    }
+  } catch {
+    if (typeof el.checkValidity === 'function') {
+      if (!el.checkValidity()) {
+        el.setAttribute('aria-invalid', 'true')
+      } else {
+        el.removeAttribute('aria-invalid')
+      }
+    }
+  }
+}
+
+document.addEventListener('blur', (e) => syncAriaInvalid(e.target), true)
+document.addEventListener('invalid', (e) => syncAriaInvalid(e.target), true)
+document.addEventListener('input', (e) => {
+  if (e.target && typeof e.target.hasAttribute === 'function' && e.target.hasAttribute('aria-invalid')) {
+    syncAriaInvalid(e.target)
+  }
+})
+
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
 async function boot() {
   // Normalize the initial hash before the first render so deep links work and
   // a bare load lands on #overview.
   bindModelParamsDialog()
+  enableDialogBackdropDismiss($('confirm-dialog'))
   if (!TABS.includes(location.hash.slice(1))) {
     history.replaceState(null, '', '#overview')
   }

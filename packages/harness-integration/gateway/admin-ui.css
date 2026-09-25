@@ -216,11 +216,24 @@
 .mila-content {
   min-width: 0;
   padding: 1.5rem;
+  view-transition-name: tab-content;
+}
+
+::view-transition-old(tab-content),
+::view-transition-new(tab-content) {
+  animation-duration: 160ms;
+  animation-timing-function: ease;
 }
 
 .mila-panel {
   min-width: 0;
   animation: mila-panel-in 200ms ease;
+}
+
+@supports (view-transition-name: tab-content) {
+  .mila-panel {
+    animation: none;
+  }
 }
 
 @keyframes mila-panel-in {
@@ -677,6 +690,7 @@ button.mila-chip:hover {
 }
 
 .mila-code-block {
+  color-scheme: dark;
   margin: 0;
   padding: 0.35rem 0.5rem;
   background: #10131a;
@@ -830,5 +844,14 @@ button.mila-chip:hover {
 
   .mila-grid-2 {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ── Dark mode media overrides for console-specific surfaces ────────────── */
+
+@media (prefers-color-scheme: dark) {
+  .mila-header img,
+  .mila-login-brand img {
+    filter: brightness(1.2) contrast(1.05);
   }
 }

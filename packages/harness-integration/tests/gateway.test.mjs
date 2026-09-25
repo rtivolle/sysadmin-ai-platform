@@ -86,6 +86,12 @@ test('trusted hosts are bare authorities and include this host LAN addresses', (
   for (const entry of listed) assert.equal(isBareAuthority(entry), true)
 })
 
+test('gateway session cookies default to Secure and allow an explicit local HTTP override', () => {
+  assert.equal(loadConfig({}).secureCookies, true)
+  assert.equal(loadConfig({ SYSADMIN_COOKIE_SECURE: 'false' }).secureCookies, false)
+  assert.equal(loadConfig({ SYSADMIN_COOKIE_SECURE: '0' }).secureCookies, false)
+})
+
 test('login body parsing accepts JSON and form encodings', () => {
   assert.deepEqual(
     parseCredentials('{"username":"sysadmin-01","password":"pw"}', 'application/json'),
@@ -215,6 +221,7 @@ test('gateway authenticates a user, scopes their instance, and proxies to it', a
     assert.equal(loginBody.redirect, '/')
     const cookie = login.headers.get('set-cookie')
     assert.match(cookie, /sysadmin_gateway=/)
+    assert.match(cookie, /; Secure(?:;|$)/, 'production session cookies must be HTTPS-only')
     assert.deepEqual(ensured, ['sysadmin-01'], 'login must start the user-scoped instance')
 
     const sessionCookie = cookie.split(';')[0]

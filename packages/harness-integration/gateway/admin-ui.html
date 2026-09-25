@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>Mila — Console d'administration sysadmin</title>
   <link rel="icon" href="/assets/mila-logo.png">
   <link rel="stylesheet" href="/assets/brand.css">
@@ -122,7 +123,7 @@
 
   <div id="toasts" class="mila-toasts" aria-live="polite"></div>
 
-  <dialog id="confirm-dialog" class="mila-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+  <dialog id="confirm-dialog" class="mila-dialog" closedby="any" aria-labelledby="confirm-title" aria-describedby="confirm-message">
     <h2 id="confirm-title"></h2>
     <p id="confirm-message"></p>
     <label class="mila-dialog-extra" id="confirm-extra-wrap" hidden>
@@ -135,7 +136,7 @@
     </div>
   </dialog>
 
-  <dialog id="model-params-dialog" class="mila-dialog" aria-labelledby="model-params-title">
+  <dialog id="model-params-dialog" class="mila-dialog" closedby="any" aria-labelledby="model-params-title">
     <h2 id="model-params-title"></h2>
     <p class="mila-muted" id="model-params-engine"></p>
     <form id="model-params-form">

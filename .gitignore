@@ -36,3 +36,4 @@ backend/config/test_deploy/
 
 # Deepwork orchestration state
 .slim/deepwork/
+.dshpreset-inbox/

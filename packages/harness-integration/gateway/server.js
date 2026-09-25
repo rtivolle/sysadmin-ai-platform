@@ -59,6 +59,7 @@ const TOKEN_RECOVERY_COOLDOWN_MS = 60_000
 
 export const LOGIN_PAGE = `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Mila — Plateforme IA Sysadmin — Connexion</title>
 <link rel="icon" href="/assets/mila-logo.png">
 <link rel="stylesheet" href="/assets/brand.css">
@@ -165,7 +166,7 @@ export function createGateway({
     if (url.pathname === '/api/gateway/logout' && req.method === 'POST') {
       const cookies = parseCookies(req.headers.cookie)
       sessions.delete(cookies[config.cookieName])
-      res.setHeader('set-cookie', `${config.cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`)
+      res.setHeader('set-cookie', `${config.cookieName}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${config.secureCookies ? '; Secure' : ''}`)
       return sendJson(res, 200, { status: 'logged_out' })
     }
 
@@ -245,7 +246,7 @@ export function createGateway({
     if (!userId) return sendJson(res, 502, { detail: 'auth gateway returned no identity' })
 
     const sessionId = sessions.create(userId)
-    res.setHeader('set-cookie', `${config.cookieName}=${sessionId}; Path=/; HttpOnly; SameSite=Lax`)
+    res.setHeader('set-cookie', `${config.cookieName}=${sessionId}; Path=/; HttpOnly; SameSite=Lax${config.secureCookies ? '; Secure' : ''}`)
 
     // Start the user's instance eagerly so the first page load is not a cold start.
     try {
