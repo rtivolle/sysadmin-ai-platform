@@ -62,9 +62,9 @@ backend/.venv/bin/python3 -m pytest backend/tests/e2e/test_30_tasks.py -q
 After changing:
 
 - **General backend logic**: `make test`
-- **Runtime/quota/approval/adapter**: Tier 1 + Tier 3
+- **Runtime/quota/approval/adapter**: Tier 1 + Tier 3 (`backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit backend/tests/tier3_concurrency -q`)
 - **Sandbox/workspace isolation**: Tier 2
-- **Audit/outbox/backup/restore**: Tier 4
+- **Audit/outbox/backup/restore**: Tier 4 (`backend/.venv/bin/python3 -m pytest backend/tests/tier4_recovery -q`)
 - **Harness integration**: `make harness-test` + `make harness-verify`
 - **Compile sanity check**: `make compile`
 - **User-visible docs or claims**: update corresponding docs and `status/TEST_READY.md` evidence where applicable
