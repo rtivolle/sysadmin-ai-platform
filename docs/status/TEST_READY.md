@@ -485,7 +485,7 @@ This is not a production acceptance certificate. The scoped target adapter and s
   output contract), and the harness JS gateway (another lane's active
   surface). The mixed uvicorn/JSON log-file format is documented.
 - Measured (development host, full stack up): `make test`
-  **717 passed, 2 skipped** in 63.56 s; harness **57/57 node tests**.
+  **729 passed, 2 skipped** in 70.72 s; harness **57/57 node tests**.
 
 ## Platform self-update — update.sh (2026-09-25)
 
