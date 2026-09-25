@@ -22,7 +22,7 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from server import load_valid_tokens
+from server import resolve_identity
 from quota_manager import QuotaManager, QuotaExceededException
 from backend.services.agent_tools.audit import log_audit_event
 
@@ -35,24 +35,25 @@ async def sysadmin_custom_auth(request: Request, api_key: str) -> UserAPIKeyAuth
     Returns UserAPIKeyAuth object configuring user limits and activating
     LiteLLM's internal rate-limiting and concurrency semaphores.
     """
-    user_id: Optional[str] = None
-    tokens_map = load_valid_tokens()
-
-    # 1. Check Bearer token or api_key
+    # 1. Bearer token from the api_key argument, else from the header
     clean_key = (api_key or "").strip()
     if clean_key.startswith("Bearer "):
         clean_key = clean_key.split(" ", 1)[1].strip()
-
-    if clean_key in tokens_map:
-        user_id = tokens_map[clean_key]
-
-    # 2. Check Authorization header from request directly if api_key was empty
-    if not user_id:
+    if not clean_key:
         auth_header = request.headers.get("authorization", "").strip()
         if auth_header.startswith("Bearer "):
-            t = auth_header.split(" ", 1)[1].strip()
-            if t in tokens_map:
-                user_id = tokens_map[t]
+            clean_key = auth_header.split(" ", 1)[1].strip()
+
+    # 2. Identity resolution is shared with ForwardAuth: file-provisioned keys in
+    #    file mode, the durable PostgreSQL key store when
+    #    SYSADMIN_CONTROL_STORE=postgres (so the two layers cannot disagree).
+    try:
+        user_id = resolve_identity(clean_key)
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Shared identity store unavailable",
+        ) from exc
 
     if not user_id:
         raise HTTPException(

@@ -25,6 +25,14 @@ export function loadConfig(env = process.env) {
   const litellmUrl = env.SYSADMIN_LITELLM_URL ?? 'http://127.0.0.1:4000/v1'
   const victoriaLogsUrl = env.VICTORIALOGS_URL ?? 'http://127.0.0.1:9428'
 
+  // The three-machine topology records peer addresses before starting services:
+  // the data host owns Valkey and SeaweedFS, and only the `all` and `inference`
+  // roles run the inference engine. Everything unset keeps today's single-host
+  // loopback values, so role `all` is unchanged.
+  const inferenceLocal = !['0', 'false', 'no', 'off'].includes(
+    String(env.SYSADMIN_INFERENCE_LOCAL ?? '').trim().toLowerCase(),
+  )
+
   return {
     host: env.SYSADMIN_GATEWAY_HOST ?? '127.0.0.1',
     port: toInt(env.SYSADMIN_GATEWAY_PORT, 3085),
@@ -74,14 +82,15 @@ export function loadConfig(env = process.env) {
       litellm: { port: urlPort(litellmUrl, 4000) },
       agent_tools: { port: urlPort(agentUrl, 3080) },
       auth_gateway: { port: urlPort(authUrl, 3081) },
-      inference: { port: toInt(env.SYSADMIN_INFERENCE_PORT, 8000) },
+      inference: { port: toInt(env.SYSADMIN_INFERENCE_PORT, 8000), local: inferenceLocal },
       seaweedfs: {
+        host: env.SYSADMIN_SEAWEEDFS_HOST ?? '127.0.0.1',
         port: toInt(env.SYSADMIN_SEAWEEDFS_PORT, 8333),
         masterPort: toInt(env.SYSADMIN_SEAWEEDFS_MASTER_PORT, 9333),
       },
       audit_outbox: { port: null },
       victorialogs: { port: urlPort(victoriaLogsUrl, 9428) },
-      valkey: { port: toInt(env.SYSADMIN_VALKEY_PORT, 6379) },
+      valkey: { host: env.SYSADMIN_VALKEY_HOST ?? '127.0.0.1', port: toInt(env.SYSADMIN_VALKEY_PORT, 6379) },
       harness_gateway: { port: toInt(env.SYSADMIN_GATEWAY_PORT, 3085) },
     },
   }

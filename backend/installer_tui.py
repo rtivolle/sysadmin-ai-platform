@@ -95,12 +95,38 @@ def display_hardware_survey(survey: Dict[str, Any]):
     )
     console.print(Panel(rec_box, title="[bold green]Hardware Recommendations[/bold green]"))
 
-def run_role_prompt(defaults_only: bool = False) -> Dict[str, Any]:
+def _is_loopback(host: Any) -> bool:
+    value = str(host or "").strip()
+    return value == "" or value.startswith("127.") or value in ("localhost", "::1")
+
+
+def validate_role_config(cfg: Dict[str, Any]) -> str:
+    """Return a fail-closed error for an unusable split, or None.
+
+    Mirrors install.sh: a split host bound to loopback, or one whose peers are
+    loopback, is a deployment that cannot work, so it must not be applied.
+    """
+    role = cfg.get("role", "all")
+    if role == "all":
+        return None
+    if _is_loopback(cfg.get("lan_bind_ip")):
+        return f"Role '{role}' needs this machine's LAN address (--lan-bind-ip <ip>)."
+    if role == "web" and _is_loopback(cfg.get("peer_inference_host")):
+        return "Role 'web' needs the inference host (--peer-inference <ip>)."
+    if role in ("web", "inference") and _is_loopback(cfg.get("peer_data_host")):
+        return f"Role '{role}' needs the data host (--peer-data <ip>)."
+    return None
+
+
+def run_role_prompt(defaults_only: bool = False, cli: Dict[str, Any] = None) -> Dict[str, Any]:
     """Ask which machine role this host plays and its peer addresses (PR-H1).
 
     Runs first in the wizard (docs/plans/MULTI_HOST_DEPLOYMENT.md §6): role,
     then peer addresses, then a connectivity check before any config is applied.
+    Values given on the command line (--role/--peer-*/--lan-bind-ip) are never
+    re-asked, so a split install can run unattended through the TUI.
     """
+    cli = cli or {}
     cfg = {
         "role": "all",
         "lan_bind_ip": "127.0.0.1",
@@ -111,7 +137,19 @@ def run_role_prompt(defaults_only: bool = False) -> Dict[str, Any]:
         "peer_data_logs_port": 9428,
         "peer_data_seaweedfs_port": 8333,
     }
+    for key in cfg:
+        if cli.get(key) not in (None, ""):
+            cfg[key] = cli[key]
+
     console.print("\n[bold cyan]═══════════ Machine Role (multi-host) ═══════════[/bold cyan]")
+
+    if cli.get("role"):
+        console.print(f"[dim]Role from the command line: {cfg['role']}.[/dim]")
+        error = validate_role_config(cfg)
+        if error:
+            console.print(f"[red]{error}[/red]")
+            raise SystemExit(2)
+        return cfg
 
     if defaults_only:
         console.print("[dim]Unattended: role = all (single host).[/dim]")
@@ -135,13 +173,23 @@ def run_role_prompt(defaults_only: bool = False) -> Dict[str, Any]:
         cfg["peer_data_host"] = Prompt.ask("Data peer (D) LAN address", default="10.0.0.12")
     # data serves only; it has no peers to reach.
 
+    error = validate_role_config(cfg)
+    if error:
+        console.print(f"[red]{error}[/red]")
+        raise SystemExit(2)
     return cfg
 
 
 def _peer_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Map the TUI cfg keys onto the connectivity/render env names."""
-    return {
-        "ROLE": cfg.get("role", "all"),
+    """Map the TUI cfg keys onto the connectivity/render env names.
+
+    For `all` every address is forced to loopback: a peer address left over from
+    an earlier split would otherwise make a single-host install talk to machines
+    that are no longer part of the deployment.
+    """
+    role = cfg.get("role", "all")
+    env = {
+        "ROLE": role,
         "LAN_BIND_IP": cfg.get("lan_bind_ip", "127.0.0.1"),
         "PEER_INFERENCE_HOST": cfg.get("peer_inference_host", "127.0.0.1"),
         "PEER_INFERENCE_PORT": str(cfg.get("peer_inference_port", 4000)),
@@ -150,12 +198,25 @@ def _peer_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "PEER_DATA_LOGS_PORT": str(cfg.get("peer_data_logs_port", 9428)),
         "PEER_DATA_SEAWEEDFS_PORT": str(cfg.get("peer_data_seaweedfs_port", 8333)),
     }
+    if role == "all":
+        env.update({
+            "LAN_BIND_IP": "127.0.0.1",
+            "PEER_INFERENCE_HOST": "127.0.0.1",
+            "PEER_INFERENCE_PORT": "4000",
+            "PEER_DATA_HOST": "127.0.0.1",
+            "PEER_DATA_VALKEY_PORT": "6379",
+            "PEER_DATA_LOGS_PORT": "9428",
+            "PEER_DATA_SEAWEEDFS_PORT": "8333",
+        })
+    return env
 
 
 def write_deployment_env(cfg: Dict[str, Any], config_dir: str) -> str:
-    """Write backend/config/roles/deployment.env; returns its path (None for `all`)."""
-    if cfg.get("role", "all") == "all":
-        return None
+    """Write backend/config/roles/deployment.env and return its path.
+
+    Written for every role, including `all` (which means "one machine, all
+    loopback"), so the choice is recorded, greppable and reversible.
+    """
     roles_dir = os.path.join(config_dir, "roles")
     os.makedirs(roles_dir, exist_ok=True)
     env_path = os.path.join(roles_dir, "deployment.env")
@@ -163,6 +224,7 @@ def write_deployment_env(cfg: Dict[str, Any], config_dir: str) -> str:
     with open(env_path, "w", encoding="utf-8") as handle:
         handle.write(
             "# Generated by installer_tui.py (PR-H1). Machine-specific; git-ignored.\n"
+            "# ROLE=all means one machine: every service, all binds loopback.\n"
             + "".join(f"{key}={value}\n" for key, value in env.items())
         )
     return env_path
@@ -182,15 +244,28 @@ def check_peer_connectivity(cfg: Dict[str, Any]) -> bool:
     return False
 
 
-def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False) -> Dict[str, Any]:
-    """Guides user through interactive prompts to configure all platform settings."""
+def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False, role: str = "all") -> Dict[str, Any]:
+    """Asks only the questions this machine's role actually needs.
+
+    Role-appropriate subsets (docs/plans/MULTI_HOST_DEPLOYMENT.md §6): the
+    inference questions belong to `all`/`inference`, the workspace and quota
+    questions to `all`/`web`, and each port question only to the roles that
+    serve it. Skipped questions keep their defaults, so the saved configuration
+    snapshot stays complete for every role.
+    """
     cfg = {}
+    ask_inference = role in ("all", "inference")
+    ask_workspaces = role in ("all", "web")
+
     console.print("\n[bold yellow]═══════════ Step 1: Inference Engine Configuration ═══════════[/bold yellow]")
 
     rec = survey["inference_recommendation"]
     default_mode = "remote_vllm" if not survey["gpus"] else ("local_gpu" if len(survey["gpus"]) >= 1 else "emulated")
 
-    if defaults_only:
+    if not ask_inference:
+        console.print(f"[dim]Role '{role}' does not run the inference engine; keeping the hardware recommendation.[/dim]")
+
+    if defaults_only or not ask_inference:
         cfg["inference_mode"] = default_mode
         cfg["upstream_vllm_url"] = "http://127.0.0.1:8000" if default_mode != "remote_vllm" else "http://gpu-cluster:8000"
         cfg["fast_model"] = rec["fast_model"]
@@ -216,30 +291,36 @@ def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False) 
         cfg["heavy_model"] = Prompt.ask("Heavy Model (Complex reasoning)", default=rec["heavy_model"])
 
     console.print("\n[bold yellow]═══════════ Step 2: Network & Gateway Ports ═══════════[/bold yellow]")
-    if defaults_only:
-        cfg["traefik_http_port"] = 8080
-        cfg["traefik_https_port"] = 8443
-        cfg["traefik_dash_port"] = 8081
-        cfg["litellm_port"] = 4000
-        cfg["valkey_port"] = 6379
-        cfg["seaweedfs_s3_port"] = 8333
-        cfg["victorialogs_port"] = 9428
-        cfg["agent_port"] = 3080
-        cfg["auth_port"] = 3081
-    else:
-        cfg["traefik_http_port"] = IntPrompt.ask("Traefik HTTP Gateway Port", default=8080)
-        cfg["traefik_https_port"] = IntPrompt.ask("Traefik HTTPS Gateway Port", default=8443)
-        cfg["traefik_dash_port"] = IntPrompt.ask("Traefik Dashboard Port", default=8081)
-        cfg["litellm_port"] = IntPrompt.ask("LiteLLM Proxy Port", default=4000)
-        cfg["valkey_port"] = IntPrompt.ask("Valkey State & Cache Port", default=6379)
-        cfg["seaweedfs_s3_port"] = IntPrompt.ask("SeaweedFS S3 Port", default=8333)
-        cfg["victorialogs_port"] = IntPrompt.ask("VictoriaLogs Audit Port", default=9428)
-        cfg["agent_port"] = IntPrompt.ask("Agent Platform API Port", default=3080)
-        cfg["auth_port"] = IntPrompt.ask("ForwardAuth Port", default=3081)
+    cfg["traefik_http_port"] = 8080
+    cfg["traefik_https_port"] = 8443
+    cfg["traefik_dash_port"] = 8081
+    cfg["litellm_port"] = 4000
+    cfg["valkey_port"] = 6379
+    cfg["seaweedfs_s3_port"] = 8333
+    cfg["victorialogs_port"] = 9428
+    cfg["agent_port"] = 3080
+    cfg["auth_port"] = 3081
+    if not defaults_only:
+        # Only the ports this role serves are worth asking about; the rest keep
+        # their defaults so the snapshot stays complete.
+        if role in ("all", "web"):
+            cfg["traefik_http_port"] = IntPrompt.ask("Traefik HTTP Gateway Port", default=8080)
+            cfg["traefik_https_port"] = IntPrompt.ask("Traefik HTTPS Gateway Port", default=8443)
+            cfg["traefik_dash_port"] = IntPrompt.ask("Traefik Dashboard Port", default=8081)
+            cfg["agent_port"] = IntPrompt.ask("Agent Platform API Port", default=3080)
+            cfg["auth_port"] = IntPrompt.ask("ForwardAuth Port", default=3081)
+        if role in ("all", "inference"):
+            cfg["litellm_port"] = IntPrompt.ask("LiteLLM Proxy Port", default=4000)
+        if role in ("all", "data"):
+            cfg["valkey_port"] = IntPrompt.ask("Valkey State & Cache Port", default=6379)
+            cfg["seaweedfs_s3_port"] = IntPrompt.ask("SeaweedFS S3 Port", default=8333)
+            cfg["victorialogs_port"] = IntPrompt.ask("VictoriaLogs Audit Port", default=9428)
 
     console.print("\n[bold yellow]═══════════ Step 3: Storage & Workspaces ═══════════[/bold yellow]")
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if defaults_only:
+    if not ask_workspaces:
+        console.print(f"[dim]Workspaces live on the web host; keeping the default path.[/dim]")
+    if defaults_only or not ask_workspaces:
         cfg["workspaces_dir"] = os.path.join(base_dir, "backend/data/workspaces")
         cfg["retention_days"] = 90
     else:
@@ -247,7 +328,9 @@ def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False) 
         cfg["retention_days"] = IntPrompt.ask("Audit Log Retention (Days)", default=90)
 
     console.print("\n[bold yellow]═══════════ Step 4: Sysadmin Users & Resource Quotas ═══════════[/bold yellow]")
-    if defaults_only:
+    if not ask_workspaces:
+        console.print(f"[dim]Quotas are enforced by LiteLLM/ForwardAuth (web/inference); keeping the defaults.[/dim]")
+    if defaults_only or not ask_workspaces:
         cfg["num_users"] = 10
         cfg["max_parallel_per_user"] = 2
         cfg["rpm_limit"] = 60
@@ -265,11 +348,24 @@ def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False) 
     return cfg
 
 def apply_configuration(cfg: Dict[str, Any], root_dir: str):
-    """Writes all configuration files, sets up workspaces, and provisions keys."""
+    """Writes the configuration files this machine's role actually serves."""
     backend_dir = os.path.join(root_dir, "backend")
     config_dir = os.path.join(backend_dir, "config")
     data_dir = os.path.join(backend_dir, "data")
     keys_dir = os.path.join(config_dir, "keys")
+
+    role = cfg.get("role", "all")
+    serves_traefik = role in ("all", "web")
+    serves_litellm = role in ("all", "inference")
+    serves_valkey = role in ("all", "data")
+
+    def write_config(path: str, content: str, enabled: bool) -> None:
+        """Write a generated config only on the roles that consume it."""
+        if not enabled:
+            console.print(f"[dim]Skipping {os.path.relpath(path, root_dir)} (role '{role}' does not serve it).[/dim]")
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
 
     with Progress(
         SpinnerColumn(),
@@ -307,8 +403,7 @@ log:
   level: INFO
   format: common
 """
-        with open(os.path.join(config_dir, "traefik/traefik.yml"), "w", encoding="utf-8") as f:
-            f.write(traefik_static)
+        write_config(os.path.join(config_dir, "traefik/traefik.yml"), traefik_static, serves_traefik)
         progress.update(task1, advance=50)
 
         # 2. Traefik Dynamic Config
@@ -328,8 +423,11 @@ log:
             "audit-service": cfg["victorialogs_port"],
         }.items():
             http_config["services"][service]["loadBalancer"]["servers"][0]["url"] = f"http://127.0.0.1:{port}"
-        with open(dynamic_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(traefik_dynamic, f, sort_keys=False)
+        if serves_traefik:
+            with open(dynamic_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(traefik_dynamic, f, sort_keys=False)
+        else:
+            console.print(f"[dim]Skipping traefik/dynamic.yml (role '{role}' does not serve it).[/dim]")
         progress.update(task1, advance=50)
 
         # 3. LiteLLM Config
@@ -348,8 +446,11 @@ log:
         litellm_config["litellm_settings"]["callbacks"] = [
             "backend.services.auth_gateway.litellm_auth.proxy_handler_instance"
         ]
-        with open(litellm_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(litellm_config, f, sort_keys=False)
+        if serves_litellm:
+            with open(litellm_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(litellm_config, f, sort_keys=False)
+        else:
+            console.print(f"[dim]Skipping litellm/config.yaml (role '{role}' does not serve it).[/dim]")
         progress.update(task2, advance=50)
 
         # 4. Valkey Config
@@ -367,14 +468,12 @@ loglevel notice
 logfile ""
 daemonize no
 """
-        with open(os.path.join(config_dir, "valkey/valkey.conf"), "w", encoding="utf-8") as f:
-            f.write(valkey_cfg)
+        write_config(os.path.join(config_dir, "valkey/valkey.conf"), valkey_cfg, serves_valkey)
         progress.update(task2, advance=50)
 
         # 5. Workspaces & Key Provisioning
         task3 = progress.add_task("[yellow]Provisioning Workspaces & Sysadmin Keys...", total=100)
         os.makedirs(keys_dir, exist_ok=True)
-        role = cfg.get("role", "all")
 
         if role in ("all", "web"):
             os.makedirs(cfg["workspaces_dir"], exist_ok=True)
@@ -404,7 +503,28 @@ def main():
     parser.add_argument("--unattended", "--default", action="store_true", help="Run unattended installation with automatic hardware-based defaults")
     parser.add_argument("--survey-only", action="store_true", help="Run hardware survey and exit")
     parser.add_argument("--start", action="store_true", help="Automatically launch all backend services after setup")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Resolve the role, show the plan and exit without writing anything")
+    parser.add_argument("--role", choices=["all", "web", "inference", "data"],
+                        help="Machine role: one host (all) or a split tier (web/inference/data)")
+    parser.add_argument("--lan-bind-ip", help="This machine's LAN address (required for every role except all)")
+    parser.add_argument("--peer-inference", help="Inference host address (role web)")
+    parser.add_argument("--peer-inference-port", type=int, help="LiteLLM port on the inference host (default 4000)")
+    parser.add_argument("--peer-data", help="Data host address (roles web and inference)")
+    parser.add_argument("--peer-data-valkey-port", type=int, help="Valkey port on the data host (default 6379)")
+    parser.add_argument("--peer-data-logs-port", type=int, help="VictoriaLogs port on the data host (default 9428)")
+    parser.add_argument("--peer-data-seaweedfs-port", type=int, help="SeaweedFS S3 port on the data host (default 8333)")
     args = parser.parse_args()
+    role_cli = {
+        "role": args.role,
+        "lan_bind_ip": args.lan_bind_ip,
+        "peer_inference_host": args.peer_inference,
+        "peer_inference_port": args.peer_inference_port,
+        "peer_data_host": args.peer_data,
+        "peer_data_valkey_port": args.peer_data_valkey_port,
+        "peer_data_logs_port": args.peer_data_logs_port,
+        "peer_data_seaweedfs_port": args.peer_data_seaweedfs_port,
+    }
 
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     data_dir = os.path.join(root_dir, "backend/data")
@@ -419,8 +539,8 @@ def main():
         return
 
     # Step 2: Wizard / Configuration Prompting
-    role_cfg = run_role_prompt(defaults_only=args.unattended)
-    cfg = run_interactive_wizard(survey, defaults_only=args.unattended)
+    role_cfg = run_role_prompt(defaults_only=args.unattended, cli=role_cli)
+    cfg = run_interactive_wizard(survey, defaults_only=args.unattended, role=role_cfg["role"])
     cfg.update(role_cfg)
 
     # Driver changes remain a separate, explicit operation, including on hosts
@@ -438,6 +558,10 @@ def main():
     summary_table.add_column("Configured Value", style="green")
 
     summary_table.add_row("Machine Role", cfg["role"])
+    if cfg["role"] != "all":
+        summary_table.add_row("This Host's LAN Address", str(cfg["lan_bind_ip"]))
+        summary_table.add_row("Inference Peer", f"{cfg['peer_inference_host']}:{cfg['peer_inference_port']}")
+        summary_table.add_row("Data Peer", f"{cfg['peer_data_host']}:{cfg['peer_data_valkey_port']}")
     summary_table.add_row("Inference Mode", cfg["inference_mode"])
     summary_table.add_row("Upstream vLLM URL", cfg["upstream_vllm_url"] or "(Local simulated)")
     summary_table.add_row("Fast Model", cfg["fast_model"])
@@ -449,6 +573,11 @@ def main():
     summary_table.add_row("Workspaces Base Path", cfg["workspaces_dir"])
     console.print(summary_table)
 
+    if args.dry_run:
+        console.print("[yellow]Dry run: nothing was written, installed or started.[/yellow]")
+        console.print(f"Re-run without --dry-run to apply the '{cfg['role']}' role.")
+        return
+
     if not args.unattended:
         confirm = Confirm.ask("Apply configuration and finalize setup now?", default=True)
         if not confirm:
@@ -457,20 +586,24 @@ def main():
 
     config_dir = os.path.join(root_dir, "backend", "config")
 
-    # Multi-host: record the role, then fail closed on unreachable peers before
-    # writing anything (docs/plans/MULTI_HOST_DEPLOYMENT.md §6).
-    env_path = write_deployment_env(cfg, config_dir)
-    if env_path and not check_peer_connectivity(cfg):
+    # Multi-host: fail closed on unreachable peers BEFORE the role is recorded
+    # or any configuration is written (docs/plans/MULTI_HOST_DEPLOYMENT.md §6).
+    if not check_peer_connectivity(cfg):
         return
 
     # Step 4: Apply Configuration
+    write_deployment_env(cfg, config_dir)
     apply_configuration(cfg, root_dir)
 
-    # Role-specific bind/upstream rendering (no-op for `all`).
-    if env_path:
-        render_config.render_all(cfg["role"], _peer_env(cfg), config_dir)
+    # Role-specific bind/upstream rendering. For `all` this reverts a previous
+    # split's rendering, so switching back to one machine is a real choice.
+    render_config.render_all(cfg["role"], _peer_env(cfg), config_dir)
 
     console.print("\n[bold white on blue] Platform Ready! [/bold white on blue]")
+    if cfg["role"] == "all":
+        console.print("Machine role: [bold]all[/bold] (one machine, everything local)")
+    else:
+        console.print(f"Machine role: [bold]{cfg['role']}[/bold] (switch back with ./install.sh --role all)")
     console.print("Commands:")
     console.print("  [bold green]./platform.sh start[/bold green]       # Start this role's services")
     console.print("  [bold green]./platform.sh dashboard[/bold green]   # Open live TUI Operations Monitor")

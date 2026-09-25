@@ -91,11 +91,37 @@ role_owns() {
 }
 
 # Export peer URLs that need no secret (safe to set for every command).
+#
+# VALKEY_HOST/VALKEY_PORT matter as much as VALKEY_URL: ForwardAuth
+# (auth_gateway/server.py) builds its P1 elevation client from
+# VALKEY_HOST/VALKEY_PORT/VALKEY_PASSWORD, not from VALKEY_URL. On the web role
+# they must name the data peer instead of loopback, otherwise every elevation
+# looks for a local Valkey that does not exist and fails closed with 503.
+# The SYSADMIN_* mirrors are what the harness admin console (web) probes.
 export_peer_urls() {
   export VICTORIALOGS_URL LITELLM_URL SYSADMIN_LITELLM_URL
+  export VALKEY_HOST VALKEY_PORT
+  export SYSADMIN_VALKEY_HOST SYSADMIN_VALKEY_PORT
+  export SYSADMIN_SEAWEEDFS_HOST SYSADMIN_SEAWEEDFS_PORT SYSADMIN_SEAWEEDFS_MASTER_PORT
+  export SYSADMIN_INFERENCE_LOCAL
   VICTORIALOGS_URL="http://${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
   LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
   SYSADMIN_LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
+  VALKEY_HOST="${PEER_DATA_HOST}"
+  VALKEY_PORT="${PEER_DATA_VALKEY_PORT}"
+  SYSADMIN_VALKEY_HOST="${PEER_DATA_HOST}"
+  SYSADMIN_VALKEY_PORT="${PEER_DATA_VALKEY_PORT}"
+  SYSADMIN_SEAWEEDFS_HOST="${PEER_DATA_HOST}"
+  SYSADMIN_SEAWEEDFS_PORT="${PEER_DATA_SEAWEEDFS_PORT}"
+  SYSADMIN_SEAWEEDFS_MASTER_PORT="${SYSADMIN_SEAWEEDFS_MASTER_PORT:-9333}"
+  # The inference engine binds loopback on the inference host by design, so a
+  # web-host console cannot probe it: it is a local probe only on the roles
+  # that actually run the engine.
+  if role_owns inference; then
+    SYSADMIN_INFERENCE_LOCAL=1
+  else
+    SYSADMIN_INFERENCE_LOCAL=0
+  fi
 }
 export_peer_urls
 
@@ -186,28 +212,65 @@ status_service() {
   fi
 }
 
+# Secrets this role actually needs (docs/multi-host.md §3):
+#   all | web | inference -> master.key + valkey-password.key
+#   data                  -> valkey-password.key only. The state tier holds no
+#                            LiteLLM key by design, so demanding master.key here
+#                            made the data host unable to start at all.
+role_needs_master_key() {
+  case "$ROLE" in all|web|inference) return 0 ;; *) return 1 ;; esac
+}
+
+# Interpreter for the small runtime-config render below. `data` installs only
+# static binaries (no venv), so fall back to the system python3.
+platform_python() {
+  if [ -x "$VENV_PYTHON" ]; then
+    echo "$VENV_PYTHON"
+    return 0
+  fi
+  command -v python3 || true
+}
+
 # Export the platform secrets and regenerate the runtime Valkey configuration.
 # Called before any service start because LiteLLM and Valkey need them.
 load_secrets() {
   local master_key_file="${CONFIG_DIR}/keys/master.key"
   local valkey_password_file="${CONFIG_DIR}/keys/valkey-password.key"
-  if [ ! -s "$master_key_file" ]; then
-    echo "Missing LiteLLM master key: $master_key_file. Run ./install.sh first." >&2
-    return 1
+
+  if role_needs_master_key; then
+    if [ ! -s "$master_key_file" ]; then
+      echo "Missing LiteLLM master key: $master_key_file. Run ./install.sh first." >&2
+      return 1
+    fi
+    export LITELLM_MASTER_KEY
+    LITELLM_MASTER_KEY="$(cat "$master_key_file")"
   fi
+
   if [ ! -s "$valkey_password_file" ]; then
-    echo "Missing Valkey password: $valkey_password_file. Run ./install.sh first." >&2
+    echo "Missing Valkey password: $valkey_password_file." >&2
+    echo "Run ./install.sh on the web host, then copy it here (docs/multi-host.md §3)." >&2
     return 1
   fi
-  export LITELLM_MASTER_KEY
-  LITELLM_MASTER_KEY="$(cat "$master_key_file")"
   export VALKEY_PASSWORD VALKEY_URL
   VALKEY_PASSWORD="$(cat "$valkey_password_file")"
   # Valkey lives on the data peer (loopback for `all`); the password still
   # comes from this machine's key file (see docs/multi-host.md §key-copy).
   VALKEY_URL="redis://:${VALKEY_PASSWORD}@${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}/0"
-  VALKEY_CONFIG_SOURCE="${CONFIG_DIR}/valkey/valkey.conf" VALKEY_CONFIG_RUNTIME="${RUN_DIR}/valkey.conf" \
-    "$VENV_PYTHON" -c 'import os, pathlib; src = pathlib.Path(os.environ["VALKEY_CONFIG_SOURCE"]); dst = pathlib.Path(os.environ["VALKEY_CONFIG_RUNTIME"]); dst.write_text(src.read_text().replace("CONFIGURE_VIA_PLATFORM_SH", os.environ["VALKEY_PASSWORD"])); dst.chmod(0o600)'
+
+  # Only the host that serves Valkey renders the runtime config: every other
+  # role reads the checked-in file only for reference and never starts Valkey.
+  case "$ROLE" in
+    all|data)
+      local python_bin
+      python_bin="$(platform_python)"
+      if [ -z "$python_bin" ]; then
+        echo "No python3 interpreter found to render ${RUN_DIR}/valkey.conf." >&2
+        return 1
+      fi
+      VALKEY_CONFIG_SOURCE="${CONFIG_DIR}/valkey/valkey.conf" VALKEY_CONFIG_RUNTIME="${RUN_DIR}/valkey.conf" \
+        "$python_bin" -c 'import os, pathlib; src = pathlib.Path(os.environ["VALKEY_CONFIG_SOURCE"]); dst = pathlib.Path(os.environ["VALKEY_CONFIG_RUNTIME"]); dst.write_text(src.read_text().replace("CONFIGURE_VIA_PLATFORM_SH", os.environ["VALKEY_PASSWORD"])); dst.chmod(0o600)'
+      ;;
+  esac
 }
 
 # Start one service by name. Secrets must already be loaded (load_secrets).
@@ -268,24 +331,32 @@ start_one() {
   esac
 }
 
+# Listening port per service ("-" when it has none). One table for status
+# lines and TCP probes.
+service_port() {
+  case "${1:-}" in
+    valkey) echo "6379" ;;
+    victorialogs) echo "9428" ;;
+    audit_outbox) echo "-" ;;
+    seaweedfs) echo "8333" ;;
+    inference) echo "8000" ;;
+    auth_gateway) echo "3081" ;;
+    agent_tools) echo "$AGENT_PORT" ;;
+    litellm) echo "4000" ;;
+    traefik) echo "8080" ;;
+    harness_gateway) echo "3085" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Print one service's status line by name.
 status_one() {
-  case "${1:-}" in
-    valkey) status_service "valkey" "6379" ;;
-    victorialogs) status_service "victorialogs" "9428" ;;
-    audit_outbox) status_service "audit_outbox" "-" ;;
-    seaweedfs) status_service "seaweedfs" "8333" ;;
-    inference) status_service "inference" "8000" ;;
-    auth_gateway) status_service "auth_gateway" "3081" ;;
-    agent_tools) status_service "agent_tools" "$AGENT_PORT" ;;
-    litellm) status_service "litellm" "4000" ;;
-    traefik) status_service "traefik" "8080" ;;
-    harness_gateway) status_service "harness_gateway" "3085" ;;
-    *)
-      echo "Unknown service: ${1:-<empty>} (known: ${SERVICE_NAMES})" >&2
-      return 1
-      ;;
-  esac
+  local port
+  if ! port="$(service_port "${1:-}")"; then
+    echo "Unknown service: ${1:-<empty>} (known: ${SERVICE_NAMES})" >&2
+    return 1
+  fi
+  status_service "$1" "$port"
 }
 
 # The gateway deliberately leaves its harness children running on SIGTERM so a
@@ -353,6 +424,23 @@ stop_all() {
   echo "All '${ROLE}' services stopped."
 }
 
+# Peer services this role consumes but does not host. They are reported so an
+# operator can tell "the tier is down" from "this host owns it elsewhere".
+peer_targets() {
+  case "$ROLE" in
+    web)
+      echo "litellm(inference) ${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}"
+      echo "valkey(data) ${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}"
+      echo "seaweedfs(data) ${PEER_DATA_HOST}:${PEER_DATA_SEAWEEDFS_PORT}"
+      echo "victorialogs(data) ${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
+      ;;
+    inference)
+      echo "valkey(data) ${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}"
+      echo "victorialogs(data) ${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
+      ;;
+  esac
+}
+
 show_status() {
   echo "=== Sysadmin AI Platform Service Status (role: ${ROLE}) ==="
   local svc
@@ -360,6 +448,13 @@ show_status() {
     role_owns "$svc" || continue
     status_one "$svc"
   done
+  if [ "$ROLE" != "all" ]; then
+    local target
+    peer_targets | while read -r target; do
+      [ -n "$target" ] || continue
+      printf "  %-18s peer %s\n" "${target%% *}" "${target#* }"
+    done
+  fi
   echo "==========================================="
 }
 
@@ -457,21 +552,66 @@ show_logs() {
   fi
 }
 
+# Wait for one host:port to accept TCP. Uses the same interpreter selection as
+# load_secrets, so the data role (no venv) can still probe its own listeners.
+wait_for_port() {
+  local host="$1" port="$2"
+  [ "$port" = "-" ] && return 0
+  local python_bin
+  python_bin="$(platform_python)"
+  [ -n "$python_bin" ] || return 1
+  local _
+  for _ in $(seq 1 10); do
+    if "$python_bin" -c "import socket; s = socket.socket(); s.settimeout(0.5); exit(s.connect_ex(('$host', $port)))" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
 run_tests() {
+  # The end-to-end suite drives the user-facing HTTP path, which only the web
+  # role (or a single host) serves.
+  if ! role_owns traefik && ! role_owns auth_gateway; then
+    echo "Role '${ROLE}' runs no application services; run './platform.sh test' on the web host." >&2
+    return 1
+  fi
+  if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Missing ${VENV_PYTHON}; run ./install.sh on this host first." >&2
+    return 1
+  fi
+
   local auto_started=false
-  if ! is_running "${RUN_DIR}/traefik.pid" || ! is_running "${RUN_DIR}/valkey.pid"; then
-    echo "Services not running. Starting all backend services for testing..."
+  local svc
+  for svc in $(role_services); do
+    if ! is_running "${RUN_DIR}/${svc}.pid"; then
+      auto_started=true
+      break
+    fi
+  done
+  if [ "$auto_started" = true ]; then
+    echo "Services not running. Starting this role's services for testing..."
     start_all
-    auto_started=true
     sleep 4
-    for port in 6379 9428 8333 8000 3081 "$AGENT_PORT" 4000 8080; do
-      for _ in $(seq 1 10); do
-        if "$VENV_PYTHON" -c "import socket; s = socket.socket(); s.settimeout(0.5); exit(s.connect_ex(('127.0.0.1', $port)))" 2>/dev/null; then
-          break
-        fi
-        sleep 0.5
-      done
+    # Wait for local listeners, then for the peer services this role reaches
+    # out to (they live on other machines in the multi-host topology).
+    for svc in $SERVICE_START_ORDER; do
+      role_owns "$svc" || continue
+      wait_for_port "127.0.0.1" "$(service_port "$svc")" || true
     done
+    case "$ROLE" in
+      web)
+        wait_for_port "$PEER_INFERENCE_HOST" "$PEER_INFERENCE_PORT" || true
+        wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_VALKEY_PORT" || true
+        wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_SEAWEEDFS_PORT" || true
+        wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_LOGS_PORT" || true
+        ;;
+      inference)
+        wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_VALKEY_PORT" || true
+        wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_LOGS_PORT" || true
+        ;;
+    esac
   fi
 
   echo "Running end-to-end backend verification test suite..."
@@ -483,6 +623,17 @@ run_tests() {
     stop_all
   fi
   return $test_exit
+}
+
+# Print which services each role starts, for planning and for install.sh's
+# dry run. The role of the *current* host is marked.
+show_role_matrix() {
+  local role
+  for role in all web inference data; do
+    local marker=" "
+    [ "$role" = "$ROLE" ] && marker="*"
+    printf " %s %-10s %s\n" "$marker" "$role" "$(ROLE="$role" role_services)"
+  done
 }
 
 case "${1:-status}" in
@@ -525,8 +676,11 @@ case "${1:-status}" in
     stop_service "harness_gateway"
     reap_harness_instances
     ;;
+  roles)
+    show_role_matrix
+    ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status|service <name> {start|stop|restart|status}|harness|harness-stop|dashboard|survey|chat|logs [service]|test}"
+    echo "Usage: $0 {start|stop|restart|status|service <name> {start|stop|restart|status}|harness|harness-stop|dashboard|survey|chat|logs [service]|test|roles}"
     exit 1
     ;;
 esac

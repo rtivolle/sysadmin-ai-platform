@@ -60,7 +60,7 @@ benchmark: ## 30-task evaluation pack
 	$(PY) -m pytest backend/tests/e2e/test_30_tasks.py -q
 
 harness-test: ## Harness package unit tests
-	$(NODE) --test packages/harness-integration/tests/
+	$(NODE) --test 'packages/harness-integration/tests/*.test.mjs'
 
 harness-verify: ## Boot the real dsh profile and verify the wiring
 	$(NODE) packages/harness-integration/scripts/verify-harness.mjs

@@ -1,6 +1,71 @@
 # Verification status
 
-Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q` from the repository root.
+Last checked: 2026-09-25. Run tests with `backend/.venv/bin/python3 -m pytest -q` from the repository root.
+
+## Machine-role install: one host or a three-machine split (2026-09-25)
+
+- **What changed.** The topology is now a first-class install-time choice:
+  `./install.sh --role all|web|inference|data` (and the same flags through
+  `--tui`), plus `--dry-run` to resolve and print the plan without touching
+  anything. Validation is fail-closed before any write (a split role bound to
+  loopback, or one whose peers are loopback, exits `2`; an unreachable peer
+  exits `1` with nothing applied — not even a `deployment.env`). The choice is
+  recorded in `backend/config/roles/deployment.env` for **every** role, reused
+  when `--role` is omitted (so `./update.sh`, which calls the installer with no
+  flags, cannot re-role a host mid-update), and reversible: `--role all` resets
+  the peers to loopback and restores the checked-in `traefik/dynamic.yml` and
+  `valkey/valkey.conf` byte-for-byte. `render_config.py` now owns the
+  non-loopback Valkey `bind` entries and finds the three managed Traefik
+  upstreams by service name, so a LAN-address change replaces rather than
+  accumulates and an operator-chosen port is still rewritten. `platform.sh`
+  loads only the secrets a role holds (the `data` tier starts with
+  `valkey-password.key` alone, and without the venv it renders the runtime
+  Valkey config with the system `python3`), exports `VALKEY_HOST`/`VALKEY_PORT`
+  and the `SYSADMIN_*` peer hosts that ForwardAuth and the harness admin console
+  need, starts only the role's services, and lists peer endpoints in `status`.
+  `update.sh`'s post-update key check is role-aware. The harness console health
+  panel probes the peer Valkey/SeaweedFS hosts and omits the remote-only
+  inference-engine probe. Docs updated: `docs/multi-host.md` (rewritten),
+  design §6/§7/§11, `configuration.md`, `backup-restore.md`, docs index, and
+  roadmap tracker PR-H1 → `in flight`.
+- **Focused suite (this session, macOS host, Python 3.14):**
+  `pytest backend/tests/tier1_unit/test_multihost_roles.py backend/tests/tier1_unit/test_multihost_render.py -q`
+  → **44 passed, 2 skipped**, 2.0 s. The two skips are the optional ShellCheck
+  checks (`shellcheck` is not installed here).
+- **Full tier-1 unit tier with the same interpreter** (scratch venv: pytest
+  9.1.1, pyyaml, rich, pydantic, fastapi, httpx, redis, uvicorn):
+  **358 passed, 30 failed, 5 skipped**. A pristine `git archive HEAD` copy run
+  with the same interpreter: **329 passed, 31 failed, 5 skipped**. Diffing the
+  two FAILED sets: **no failure exists only in the changed tree**, and one
+  failure exists only in the baseline
+  (`test_m2_readonly_slice.py::test_forwardauth_verify_alias`, which passed in
+  the changed tree). The 30 failures are environment-caused and pre-existing
+  (Linux-only target-adapter/config-deployment permission semantics, absent
+  `litellm`, absent `nvidia-smi`). The changed tree adds 28 collected tests
+  (`test_multihost_roles.py`), all passing; the +29 net gain in passing tests
+  includes the one baseline-only failure that passed in the changed tree.
+- **Harness package:** `make harness-test` → **60 tests, 59 pass, 1 skip, 0
+  fail** (Node v24.18.1). Pristine HEAD: 57 tests, 56 pass, 1 skip. The skip is
+  pre-existing (`policy.test.mjs:72` needs `backend/.venv/bin/python3`). The
+  Makefile target now passes a quoted glob
+  (`--test 'packages/harness-integration/tests/*.test.mjs'`): Node 24 does not
+  expand a directory argument, so the previous form was a pre-existing
+  portability break on this host, not a behavioural change.
+- **`make harness-verify` → 4/8 checks**, identical to the pristine-HEAD result
+  (profile, plugin row, LiteLLM route and default-model routing pass; the four
+  checks that boot the dsh web surface fail because no launch URL is produced in
+  this session). Environment limit, unchanged by this work.
+- **Syntax:** `bash -n` on `install.sh`, `backend/platform.sh` and `update.sh`
+  is clean; `ast.parse` on every touched Python file is clean.
+- **Not measured.** The topology itself has still never been run: no staged
+  D → I → W bring-up, no suite pointed at a remote Valkey/VictoriaLogs, no
+  firewall evidence, no key-copy or two-step revocation drill, and no check of
+  the harness admin console against a live three-machine stack. Those remain the
+  PR-H1 acceptance gate (checklist in `docs/multi-host.md` §7). `make test`
+  with the repository venv could not run on this host at all —
+  `backend/.venv/bin/python3` is a dangling symlink to a Linux path
+  (`/home/linuxbrew/...`) — which is why an equivalent scratch interpreter was
+  used. `make test-live`, `make benchmark` and every GPU/vLLM path were not run.
 
 ## NVIDIA setup and native vLLM configuration (2026-09-24)
 

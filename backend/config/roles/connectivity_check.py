@@ -7,6 +7,12 @@ because install.sh invokes it before the venv exists.
 
 Usage:
     python3 backend/config/roles/connectivity_check.py [deployment.env]
+    ROLE=web PEER_INFERENCE_HOST=10.0.0.11 PEER_DATA_HOST=10.0.0.12 \
+        python3 backend/config/roles/connectivity_check.py
+
+Values taken from the process environment win over the file, so the installer
+can validate a role before it writes (or overwrites) deployment.env: a failed
+check leaves the machine exactly as it was.
 """
 import os
 import socket
@@ -37,6 +43,9 @@ _DEFAULTS = {
     "PEER_DATA_SEAWEEDFS_PORT": "8333",
 }
 
+# Keys the environment may supply or override.
+_ENV_KEYS = ("ROLE", "LAN_BIND_IP") + tuple(_DEFAULTS)
+
 
 def parse_env_file(path):
     env = {}
@@ -49,6 +58,17 @@ def parse_env_file(path):
                 continue
             key, _, value = line.partition("=")
             env[key.strip()] = value.strip().strip('"').strip("'")
+    return env
+
+
+def resolve_env(env_path=None, environ=None):
+    """Deployment values, with non-empty process environment values winning."""
+    env = parse_env_file(env_path)
+    source = os.environ if environ is None else environ
+    for key in _ENV_KEYS:
+        value = source.get(key)
+        if value:
+            env[key] = value
     return env
 
 
@@ -83,7 +103,7 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     env_path = argv[0] if argv else None
 
-    env = parse_env_file(env_path)
+    env = resolve_env(env_path)
     role = env.get("ROLE", "all") or "all"
 
     failures = check_role(role, env)
@@ -99,7 +119,10 @@ def main(argv=None):
         )
         return 1
 
-    print(f"Connectivity check passed for role '{role}'.")
+    if role in ("all", "data"):
+        print(f"Connectivity check passed for role '{role}' (no peers to reach).")
+    else:
+        print(f"Connectivity check passed for role '{role}'.")
     return 0
 
 

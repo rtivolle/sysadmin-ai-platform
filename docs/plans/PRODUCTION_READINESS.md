@@ -320,7 +320,7 @@ backed by a recorded run:
 | PR-B3 | Multi-worker Valkey run | P1 | — | not started | — |
 | PR-B4 | Restore bring-up + scale | P1 | — | not started | file-level drill done 2026-09-24 |
 | PR-B5 | Owner-scored 30-task eval | P1 | C1 | not started | synthetic pack only |
-| PR-H1 | Three-machine deployment | P1 | — | not started | design: `docs/plans/MULTI_HOST_DEPLOYMENT.md` |
+| PR-H1 | Three-machine deployment | P1 | — | **in flight** | role plumbing implemented + unit-tested (2026-09-25): `docs/multi-host.md`, `test_multihost_roles.py`; real-machine bring-up still outstanding |
 | PR-D1 | Metrics, alerts, runbooks | P1 | C1 | not started | — |
 | PR-D2 | Off-host backup + audit anchor | P1 | — | not started | — |
 | PR-B6 | 24 h pilot soak | P1 | C2, D1 | not started | — |

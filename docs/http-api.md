@@ -102,6 +102,33 @@ Returns `{"status":"updated","user_id":"sysadmin-01","overrides":{...}}`.
 A successful update is recorded as a `quota_update` audit event with the
 reviewer as `user_id` and `parameters.{user_id,limits}`.
 
+### `GET /api/v1/admin/keys`
+
+Administrator only; lists live key metadata (`user_id`, `label`, `created_at`,
+`created_by`). Token material and hashes are never returned. Optional
+`?user=<id>` filters to one identity.
+
+- `409` the durable control store is not enabled (`SYSADMIN_CONTROL_STORE`);
+- `503` store selected but unreachable.
+
+### `POST /api/v1/admin/keys/{user_id}/rotate`
+
+Administrator only. Atomically replaces **every** live key of the identity with a
+new one (optional body `{"label": "..."}`) and records an `api_key_rotate` audit
+event. Returns `{"status":"rotated","user_id":...,"key":"sk-…","shown_once":true}`
+with `Cache-Control: no-store` — that response is the only copy of the new key
+the platform ever produces; only its SHA-256 is stored.
+
+- `404` unknown identity; `409` store not enabled; `503` store unavailable.
+
+### `POST /api/v1/admin/keys/{user_id}/revoke`
+
+Administrator only. Revokes every live key of the identity immediately (no cached
+token map), records an `api_key_revoke` audit event and returns
+`{"status":"revoked","user_id":...,"revoked":N}`.
+
+- `404` unknown identity; `409` store not enabled; `503` store unavailable.
+
 ### `GET /health`
 
 Service health.

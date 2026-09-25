@@ -18,7 +18,7 @@ where a divergence is already documented as intentional (e.g. in
 
 | ADR | Divergence (plan/spec → implementation) | Status | Qualified? | Evidence / corrective item |
 |---|---|---|---|---|
-| [ADR-0001](ADR-0001-file-based-keys-valkey-no-postgresql.md) | PostgreSQL-backed LiteLLM virtual keys → file-based bearer keys + Valkey state | Proposed | **No** | No key rotation/revocation test; no key restart-durability test. Corrective work required. |
+| [ADR-0001](ADR-0001-file-based-keys-valkey-no-postgresql.md) | PostgreSQL-backed LiteLLM virtual keys → file-based bearer keys + Valkey state | Proposed — **superseded by ADR-0014** for key lifecycle and durable control state | **Partial** | File keys stay the provisioning input; the durable key store is the runtime authority (ADR-0014). LiteLLM virtual keys remain unimplemented. |
 | [ADR-0002](ADR-0002-no-nvidia-dynamo.md) | NVIDIA Dynamo (KV routing, P/D disaggregation) → not implemented | Proposed | **Yes (scope reduction)** | Deferral recorded in plan §1/§3/§5; no Dynamo code. |
 | [ADR-0003](ADR-0003-simulated-inference-fallback.md) | Standalone vLLM → deterministic simulator + optional upstream proxy | Proposed | **Partial** | Fail-closed routing qualified (`test_inference_gateway.py`); no real vLLM run. Corrective: PR-C1. |
 | [ADR-0004](ADR-0004-llamacpp-engine-added.md) | vLLM-only → llama.cpp (GGUF) engine added | Proposed | **Partial** | Unit-qualified (`test_model_manager.py` llama.cpp tests); no live download/start. Corrective: Phase 2 live. |
@@ -31,6 +31,7 @@ where a divergence is already documented as intentional (e.g. in
 | [ADR-0011](ADR-0011-p1-bounded-elevation.md) | "Unlimited" P1 key → time-bounded, quota-raised elevation | Proposed | **Yes** | Lifecycle/revocation/bypass tests (`test_m3_p1_elevation.py`, `test_m3_adversarial_p1_dr.py`). |
 | [ADR-0012](ADR-0012-daily-token-ledger.md) | Monetary `max_budget` 2000 → separate daily token ledger | Proposed | **Yes** | `test_daily_token_reservation.py`, `test_rate_limits.py`, `test_empirical_challenger.py`. |
 | [ADR-0013](ADR-0013-audit-integrity-archive.md) | "Immutable" audit → outbox + VictoriaLogs, no integrity archive | Proposed | **Partial** | Outbox durability qualified; no tamper-evident archival (PR-D2). |
+| [ADR-0014](ADR-0014-postgresql-control-store.md) | ADR-0001's file-only keys + Valkey ledger → local PostgreSQL control store (key lifecycle + durable token ledger), Valkey for counters/leases | Proposed (implemented at service level) | **Partial** | 66 unit tests qualify resolution, rotation/revocation atomicity, hashing, ledger exactly-once and fail-closed behaviour; live cluster, LiteLLM `database_url` start and platform wiring not measured (corrective work 1–2). |
 
 ## Summary
 
@@ -39,7 +40,8 @@ where a divergence is already documented as intentional (e.g. in
 - **Partially qualified (some contract tested, live/edge cases open):**
   ADR-0003, ADR-0004, ADR-0006, ADR-0007, ADR-0008, ADR-0009, ADR-0010,
   ADR-0013.
-- **Not qualified — corrective work required:** ADR-0001 (key
-  rotation/revocation and restart durability have **no** qualifying test, and no
-  mechanism exists; this is the only divergence with a fully unqualified
-  contract).
+- **Not qualified — corrective work required:** none. ADR-0001 was the only
+  divergence with a fully unqualified contract; [ADR-0014](ADR-0014-postgresql-control-store.md)
+  supplies the mechanism (audited issue/rotate/revoke, durable ledger with
+  reconciliation) and the qualifying tests, and is itself partially qualified
+  until the live-cluster and wiring items land.

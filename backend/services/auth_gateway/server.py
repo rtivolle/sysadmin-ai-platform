@@ -31,6 +31,27 @@ try:
 except ImportError:
     from quota_manager import QuotaManager, QuotaExceededException, quota_mgr
 
+# Durable control store (the PostgreSQL leg). Importing it never imports a
+# database driver: the store is contacted only when SYSADMIN_CONTROL_STORE is
+# 'postgres' (or an explicit SYSADMIN_DATABASE_URL is set). A broken import must
+# not silently downgrade an explicitly selected store to the file map, so the
+# failure is remembered and surfaced as a fail-closed 503 on use.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+_CONTROL_STORE_IMPORT_ERROR: Optional[str] = None
+try:
+    from services.control_store import (  # noqa: E402
+        ControlStoreError,
+        ControlStoreUnavailable,
+        open_key_store,
+    )
+except ImportError as _exc:  # pragma: no cover - only on a broken checkout
+    ControlStoreError = RuntimeError  # type: ignore[assignment,misc]
+    ControlStoreUnavailable = ConnectionError  # type: ignore[assignment,misc]
+    open_key_store = None  # type: ignore[assignment]
+    _CONTROL_STORE_IMPORT_ERROR = str(_exc)
+
 from services.agent_tools.audit import log_audit_event
 from services.logging_setup import RequestLoggingMiddleware, configure, get_logger, log_event
 
@@ -54,7 +75,15 @@ async def _audit_async(**event_kwargs):
 
 @app.exception_handler(ConnectionError)
 async def shared_state_unavailable(_request: Request, _exc: ConnectionError):
-    return JSONResponse(status_code=503, content={"detail": "Shared P1 elevation store unavailable"})
+    """A required shared store (Valkey, or the durable control store) is down.
+
+    Fail closed with 503 rather than continuing on local state, and do not echo
+    the exception text: it can name an internal DSN or store. The class name is
+    logged so an operator can tell a store outage from a bug, without risking a
+    credential in the log.
+    """
+    _LOG.warning("shared state store unavailable: %s", _exc.__class__.__name__)
+    return JSONResponse(status_code=503, content={"detail": "Shared state store unavailable"})
 
 ROOT_DIR = CURRENT_DIR.parent.parent
 KEYS_DIR = ROOT_DIR / "config" / "keys"
@@ -126,12 +155,74 @@ def load_valid_tokens() -> Dict[str, str]:
     return tokens
 
 
+_key_store: Optional[object] = None
+
+
+def master_credential() -> Optional[str]:
+    """The recovery/admin credential: the injected master key, else master.key."""
+    if MASTER_TOKEN:
+        return MASTER_TOKEN
+    try:
+        value = (KEYS_DIR / "master.key").read_text().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def get_key_store():
+    """Return the durable key store, or None when file mode is selected.
+
+    Raises ``ConnectionError`` (HTTP 503) when the store is selected but cannot
+    be built or reached: an authoritative store must never be bypassed.
+    """
+    global _key_store
+    selected = (
+        os.getenv("SYSADMIN_CONTROL_STORE", "").strip().lower() in {"postgres", "postgresql"}
+        or bool(os.getenv("SYSADMIN_DATABASE_URL", "").strip())
+    )
+    if _key_store is None:
+        if open_key_store is None:
+            if selected:
+                raise ConnectionError(
+                    "Durable control store selected but its module is unavailable: "
+                    f"{_CONTROL_STORE_IMPORT_ERROR}"
+                )
+            return None
+        try:
+            _key_store = open_key_store()
+        except ControlStoreError as exc:
+            raise ConnectionError(f"Durable control store misconfigured: {exc}") from exc
+        if _key_store is None and selected:
+            raise ConnectionError("Durable control store selected but no DSN could be resolved")
+    return _key_store
+
+
+def resolve_identity(token: str) -> Optional[str]:
+    """Resolve a bearer token to a user_id, or None when it is not valid.
+
+    With ``SYSADMIN_CONTROL_STORE=postgres` the durable store is authoritative
+    and an outage raises ``ConnectionError`` instead of falling back to the file
+    map (ADR-0001 corrective work, AGENTS.md §4). The master credential always
+    resolves to the admin identity so the store stays administrable.
+    """
+    clean = (token or "").strip()
+    if not clean:
+        return None
+    master = master_credential()
+    if master and hmac.compare_digest(clean, master):
+        return "sysadmin-admin"
+    store = get_key_store()
+    if store is None:
+        return load_valid_tokens().get(clean)
+    return store.resolve(clean)
+
+
 def authenticate_request(request: Request) -> tuple[str, str]:
     """Validate credentials directly; never accept forwarded identity headers."""
     auth_header = request.headers.get("authorization", "").strip()
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1].strip()
-        user_id = load_valid_tokens().get(token)
+        user_id = resolve_identity(token)
         if user_id:
             return user_id, "bearer_token"
 
@@ -195,6 +286,70 @@ async def admin_set_quota(user_id: str, request: Request):
                     action="quota_update", parameters={"user_id": user_id, "limits": body["limits"]},
                     exit_code=0, duration_ms=0)
     return {"status": "updated", "user_id": user_id, "overrides": body["limits"]}
+
+def require_key_store():
+    """Return the durable key store or explain, fail-closed, why it is absent."""
+    store = get_key_store()
+    if store is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Durable key store is not enabled (set SYSADMIN_CONTROL_STORE=postgres)",
+        )
+    return store
+
+
+async def _optional_label(request: Request) -> str:
+    try:
+        body = await request.json()
+    except Exception:
+        return ""
+    if isinstance(body, dict) and isinstance(body.get("label"), str):
+        return body["label"][:120]
+    return ""
+
+
+@app.get("/api/v1/admin/keys")
+def admin_list_keys(request: Request, user: Optional[str] = None):
+    """Metadata for live keys; token material and hashes are never returned."""
+    require_quota_admin(request)
+    try:
+        return {"keys": require_key_store().active_keys(user)}
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Durable control store unavailable") from exc
+
+
+@app.post("/api/v1/admin/keys/{user_id}/rotate")
+async def admin_rotate_key(user_id: str, request: Request):
+    """Atomically replace every live key of a user; the new key is shown once."""
+    admin = require_quota_admin(request)
+    if user_id not in VALID_USERS:
+        raise HTTPException(status_code=404, detail="Unknown identity")
+    label = await _optional_label(request)
+    try:
+        token = require_key_store().rotate(user_id, label=label, created_by=admin)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Durable control store unavailable") from exc
+    # Never cached, never audited, never logged: this is the only copy the
+    # operator receives. The store keeps only the SHA-256 of the token.
+    return JSONResponse(
+        status_code=200,
+        content={"status": "rotated", "user_id": user_id, "key": token, "shown_once": True},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/v1/admin/keys/{user_id}/revoke")
+async def admin_revoke_key(user_id: str, request: Request):
+    """Revoke every live key of a user; validation is immediate (no cached map)."""
+    admin = require_quota_admin(request)
+    if user_id not in VALID_USERS:
+        raise HTTPException(status_code=404, detail="Unknown identity")
+    try:
+        revoked = require_key_store().revoke(user_id, actor=admin)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail="Durable control store unavailable") from exc
+    return {"status": "revoked", "user_id": user_id, "revoked": revoked}
+
 
 @app.get("/verify")
 @app.post("/verify")

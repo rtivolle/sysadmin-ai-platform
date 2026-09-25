@@ -10,6 +10,7 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
+import { createAdminConsole } from '../gateway/admin.js'
 import { loadConfig } from '../gateway/config.js'
 import { createGateway } from '../gateway/server.js'
 
@@ -429,3 +430,78 @@ test('starts and stops allowlisted services without allowing self-termination', 
     assert.equal((await adminFetch(`/api/admin/services/harness_gateway/${action}`, { method: 'POST', body: {} })).status, 409)
   }
 })
+
+// ── Role-aware service probes (three-machine topology) ──────────────────────
+//
+// The console runs on the web host, while Valkey and SeaweedFS live on the
+// data peer and the inference engine only exists on the host that runs it.
+// These checks are offline: they inspect the probe list, they never probe.
+
+/** A console with just enough collaborators to build the probe list. */
+function probeConsole(env) {
+  const store = { get: () => null, list: () => [], delete: () => {}, create: () => 'unused' }
+  return createAdminConsole({
+    config: loadConfig(env),
+    sessions: store,
+    adminSessions: store,
+    instances: { activeUsers: () => [], listStatus: () => [] },
+    logger: () => {},
+  })
+}
+
+/** @param {{ name: string }[]} probes @param {string} name */
+function probeNamed(probes, name) {
+  return probes.find((probe) => probe.name === name)
+}
+
+test('keeps the single-host 127.0.0.1 probes when no role environment is set', () => {
+  assert.deepEqual(probeConsole({}).serviceProbes(), [
+    { name: 'auth_gateway', url: 'http://127.0.0.1:3081/health' },
+    { name: 'agent_tools', url: 'http://127.0.0.1:3080/health' },
+    { name: 'litellm', url: 'http://127.0.0.1:4000/health/liveliness' },
+    { name: 'victorialogs', url: 'http://127.0.0.1:9428/health' },
+    { name: 'traefik', url: 'http://127.0.0.1:8080/ping' },
+    { name: 'inference', url: 'http://127.0.0.1:8000/health' },
+    { name: 'seaweedfs', url: 'http://127.0.0.1:9333/cluster/status' },
+    { name: 'valkey', tcp: { host: '127.0.0.1', port: 6379 } },
+  ])
+  const config = loadConfig({})
+  assert.equal(config.services.inference.local, true)
+  assert.deepEqual(config.services.valkey, { host: '127.0.0.1', port: 6379 })
+  assert.deepEqual(config.services.seaweedfs, { host: '127.0.0.1', port: 8333, masterPort: 9333 })
+})
+
+test('probes the data peer and omits the remote inference engine', () => {
+  const env = {
+    SYSADMIN_VALKEY_HOST: '10.42.0.12',
+    SYSADMIN_VALKEY_PORT: '6380',
+    SYSADMIN_SEAWEEDFS_HOST: '10.42.0.12',
+    SYSADMIN_SEAWEEDFS_PORT: '8334',
+    SYSADMIN_SEAWEEDFS_MASTER_PORT: '9334',
+    SYSADMIN_INFERENCE_LOCAL: '0',
+    SYSADMIN_BACKEND_URL: 'http://10.42.0.11:3080',
+    SYSADMIN_AUTH_URL: 'http://10.42.0.11:3081',
+    SYSADMIN_LITELLM_URL: 'http://10.42.0.13:4000/v1',
+    VICTORIALOGS_URL: 'http://10.42.0.12:9428',
+  }
+  const probes = probeConsole(env).serviceProbes()
+  assert.deepEqual(probeNamed(probes, 'valkey'), { name: 'valkey', tcp: { host: '10.42.0.12', port: 6380 } })
+  assert.deepEqual(probeNamed(probes, 'seaweedfs'), { name: 'seaweedfs', url: 'http://10.42.0.12:9334/cluster/status' })
+  assert.equal(probeNamed(probes, 'inference'), undefined, 'a remote inference engine must not be reported as down')
+  assert.ok(probes.some((probe) => probe.name === 'litellm' && probe.url === 'http://10.42.0.13:4000/health/liveliness'))
+  assert.ok(probes.some((probe) => probe.name === 'victorialogs' && probe.url === 'http://10.42.0.12:9428/health'))
+  const config = loadConfig(env)
+  assert.equal(config.services.inference.local, false)
+  assert.equal(config.services.seaweedfs.port, 8334)
+  assert.equal(config.services.valkey.port, 6380)
+})
+
+test('probes the inference engine on the host that runs it', () => {
+  const env = { SYSADMIN_INFERENCE_LOCAL: '1', SYSADMIN_INFERENCE_PORT: '8123' }
+  const probes = probeConsole(env).serviceProbes()
+  assert.deepEqual(probeNamed(probes, 'inference'), { name: 'inference', url: 'http://127.0.0.1:8123/health' })
+  const config = loadConfig(env)
+  assert.equal(config.services.inference.local, true)
+  assert.equal(config.services.inference.port, 8123)
+})
+

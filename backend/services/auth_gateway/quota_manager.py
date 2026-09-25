@@ -24,6 +24,57 @@ from backend.services.agent_tools.audit import log_audit_event
 
 logger = logging.getLogger("auth_gateway.quota_manager")
 
+# Durable control store (the PostgreSQL leg). Valkey stays the atomic counter
+# and lease store; PostgreSQL keeps the record that must survive a restart, a
+# lost AOF or a flushed keyspace. The import is lazy so that loading this module
+# never requires a database driver, and the selection is explicit: with
+# SYSADMIN_CONTROL_STORE=postgres an unreachable store raises ConnectionError
+# (HTTP 503) instead of silently falling back to a non-durable counter.
+_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+
+def control_store_selected() -> bool:
+    """True when the durable store is explicitly selected for this process."""
+    mode = os.getenv("SYSADMIN_CONTROL_STORE", "").strip().lower()
+    if mode in {"postgres", "postgresql"}:
+        return True
+    return bool(os.getenv("SYSADMIN_DATABASE_URL", "").strip())
+
+
+class _UnavailableLedger:
+    """A selected-but-unusable durable store: every call fails closed.
+
+    A missing password file or an unreachable cluster must not crash the service
+    at import time (the health endpoint still has to answer, and the operator
+    needs a log line). It must equally never be skipped: every operation raises
+    ``ConnectionError``, which the HTTP layers surface as 503.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def __getattr__(self, _name):
+        def _fail(*_args, **_kwargs):
+            raise ConnectionError(f"Durable control store unavailable: {self.reason}")
+
+        return _fail
+
+
+def _open_durable_ledger():
+    """Build the durable ledger, or return None when file mode is selected."""
+    if not control_store_selected():
+        return None
+    from services.control_store import open_token_ledger
+
+    try:
+        return open_token_ledger()
+    except ConnectionError as exc:
+        # Logged once, then enforced on every operation: no silent downgrade.
+        logger.error("Durable control store is selected but unusable: %s", exc)
+        return _UnavailableLedger(str(exc))
+
 # The sorted sets below are the single source of truth for live leases. The
 # `inflight:<user>` integer keys are a compatibility mirror for dashboards that
 # predate leases; they are written inside the same atomic script so they cannot
@@ -141,6 +192,21 @@ redis.call('EXPIRE', KEYS[5], 120)
 return {1, consumed, estimate and 'settled' or 'reservation_missing'}
 """
 
+# Reconciliation floor: raise the runtime counter to the durable total in one
+# atomic step, so two processes reconciling at the same time cannot double-charge
+# and a lost counter is restored instead of handing back a fresh budget.
+LUA_RECONCILE_DAILY = """
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local floor = tonumber(ARGV[1])
+if floor > current then
+  redis.call('SET', KEYS[1], floor)
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+  return {1, floor}
+end
+return {0, current}
+"""
+
+
 class QuotaExceededException(Exception):
     def __init__(self, limit_type: str, message: str, current: Any, limit: Any):
         super().__init__(message)
@@ -245,6 +311,7 @@ class QuotaManager:
         valkey_url: Optional[str] = None,
         redis_client: Optional[Any] = None,
         enforce_cluster_limits: Optional[bool] = None,
+        durable_ledger: Optional[Any] = None,
     ):
         self.valkey_url = valkey_url or os.getenv("VALKEY_URL", "redis://:CONFIGURE_VIA_PLATFORM_SH@127.0.0.1:6379/0")
         self.require_shared = bool(valkey_url or os.getenv("VALKEY_URL") or redis_client is not None)
@@ -257,6 +324,12 @@ class QuotaManager:
             self.enforce_cluster_limits = enforce_cluster_limits
         else:
             self.enforce_cluster_limits = os.getenv("ENFORCE_CLUSTER_CONCURRENCY", "0") == "1"
+        # None means "not supplied": consult the environment. An explicit object
+        # (including a fake in tests) is always honoured.
+        self.durable_ledger = _open_durable_ledger() if durable_ledger is None else durable_ledger
+        # (user_id, day) pairs already reconciled by this process, so the floor
+        # query runs once per day per user rather than on every admission.
+        self._reconciled_days: set = set()
 
     @property
     def redis(self) -> Optional[redis.Redis]:
@@ -595,6 +668,88 @@ class QuotaManager:
         when = time.time() if epoch_seconds is None else epoch_seconds
         return datetime.datetime.fromtimestamp(when, tz=tz).date().isoformat()
 
+    # --- Durable ledger (PostgreSQL leg) ---------------------------------
+    #
+    # Each hook is a no-op unless a durable ledger is configured, and each one
+    # fails closed: a store that is required must never be skipped, because a
+    # skipped write means a restart can hand the same budget out twice.
+    def _durable_call(self, method: str, *args) -> Any:
+        ledger = self.durable_ledger
+        if ledger is None:
+            return None
+        try:
+            return getattr(ledger, method)(*args)
+        except Exception as exc:
+            if isinstance(exc, ConnectionError):
+                raise
+            raise ConnectionError("Durable control store unavailable") from exc
+
+    def _durable_record_reservation(
+        self, user_id: str, day: str, reservation_id: str, estimated_tokens: int
+    ) -> None:
+        self._durable_call(
+            "record_reservation",
+            user_id,
+            day,
+            reservation_id,
+            estimated_tokens,
+            self.RESERVATION_TTL_SECONDS,
+        )
+
+    def _durable_settle(
+        self, user_id: str, day: str, reservation_id: str, actual: int
+    ) -> bool:
+        return bool(self._durable_call("settle", user_id, day, reservation_id, actual))
+
+    def _durable_record_direct_usage(self, user_id: str, day: str, total: int) -> None:
+        self._durable_call("record_direct_usage", user_id, day, total)
+
+    def reconcile_daily_usage(self, user_id: str, day: Optional[str] = None) -> int:
+        """Raise the runtime counter to the durable total and return that floor.
+
+        Expired, never-reported reservations are first made permanent at their
+        estimate (conservative charge), then the day's counter is raised in one
+        atomic step: two processes reconciling at once cannot double-charge.
+        """
+        ledger = self.durable_ledger
+        if ledger is None:
+            return 0
+        target_day = day or self._quota_day()
+        self._durable_call("settle_expired", user_id, target_day)
+        floor = int(self._durable_call("durable_total", user_id, target_day) or 0)
+        if floor <= 0:
+            return 0
+        r = self.redis
+        if r:
+            try:
+                result = r.eval(
+                    LUA_RECONCILE_DAILY,
+                    1,
+                    f"daily_tokens:{user_id}:{target_day}",
+                    floor,
+                    self.RESERVATION_TTL_SECONDS,
+                )
+                return int(result[1])
+            except Exception as exc:
+                if self.require_shared:
+                    raise ConnectionError("Shared quota state unavailable") from exc
+                return floor
+        with self._local_lease_lock:
+            actual_by_day = getattr(self, "_local_daily_actual", {})
+            current = actual_by_day.get((user_id, target_day), 0)
+            if floor > current:
+                actual_by_day[(user_id, target_day)] = floor
+                self._local_daily_actual = actual_by_day
+            return max(current, floor)
+
+    def _ensure_reconciled(self, user_id: str, day: str) -> int:
+        """Reconcile once per (user, day) in this process; propagate failures."""
+        if self.durable_ledger is None or (user_id, day) in self._reconciled_days:
+            return 0
+        floor = self.reconcile_daily_usage(user_id, day)
+        self._reconciled_days.add((user_id, day))
+        return floor
+
     def reserve_daily_token_budget(
         self,
         user_id: str,
@@ -607,6 +762,9 @@ class QuotaManager:
             raise ValueError("A reservation ID and non-negative estimate are required")
         day = admission_day or self._quota_day()
         limit = self.get_limits(user_id)["daily_tokens"]
+        # After a restart, or after a lost Valkey counter, raise the day's
+        # counter to the durable floor before admitting anything against it.
+        self._ensure_reconciled(user_id, day)
         now = time.time()
         expires_at = now + self.RESERVATION_TTL_SECONDS
         daily_key = f"daily_tokens:{user_id}:{day}"
@@ -635,7 +793,9 @@ class QuotaManager:
                     raise QuotaExceededException("daily_tokens", f"Daily token budget exhausted ({actual + already_reserved:,}/{limit:,} tokens reserved or consumed).", actual + already_reserved, limit)
                 reservations[identity] = (estimated_tokens, expires_at)
                 self._local_daily_reservations = reservations
-                return day, actual + already_reserved + estimated_tokens, limit
+                admitted = (day, actual + already_reserved + estimated_tokens, limit)
+            self._durable_record_reservation(user_id, day, reservation_id, estimated_tokens)
+            return admitted
         try:
             result = r.eval(
                 LUA_RESERVE_DAILY_TOKENS, 4, daily_key, index_key, active_key, settled_key,
@@ -652,6 +812,7 @@ class QuotaManager:
                     current,
                     limit,
                 )
+            self._durable_record_reservation(user_id, day, reservation_id, estimated_tokens)
             return day, current, limit
         except (QuotaExceededException, ValueError):
             raise
@@ -690,15 +851,19 @@ class QuotaManager:
                 self._local_daily_reservations = reservations
                 self._local_daily_actual = actual_by_day
                 self._local_daily_settled = done
-                return actual_by_day[(user_id, admission_day)]
+                settled_total = actual_by_day[(user_id, admission_day)]
+            self._durable_settle(user_id, admission_day, reservation_id, actual)
+            return settled_total
         try:
             result = r.eval(
                 LUA_SETTLE_DAILY_TOKENS, 5, daily_key, active_key, settled_key, index_key, tpm_key,
                 reservation_id, actual, self.RESERVATION_TTL_SECONDS, time.time(),
             )
-            return int(result[1])
+            settled_total = int(result[1])
         except Exception as exc:
             raise ConnectionError("Shared quota state unavailable") from exc
+        self._durable_settle(user_id, admission_day, reservation_id, actual)
+        return settled_total
 
     def record_token_consumption(self, user_id: str, prompt_tokens: int, completion_tokens: int):
         total = prompt_tokens + completion_tokens
@@ -720,6 +885,7 @@ class QuotaManager:
                     raise ConnectionError("Shared quota state unavailable") from exc
         elif self.require_shared:
             raise ConnectionError("Shared quota state unavailable")
+        self._durable_record_direct_usage(user_id, today_str, total)
         self.record_tpm_consumption(user_id, total, now)
 
     def record_tpm_consumption(self, user_id: str, total_tokens: int, timestamp: Optional[float] = None) -> None:

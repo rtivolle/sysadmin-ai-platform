@@ -17,6 +17,23 @@ The resilience package lives in `backend/services/resilience/`.
 Each component gets an aggregate SHA-256 over its files (sorted deterministically
 by path). The archive itself is hashed and recorded in the final manifest.
 
+**In a three-machine split** ([multi-host.md](multi-host.md)) each machine backs
+up its own scope: D's `config_keys` holds `valkey-password.key` only (the state
+tier has no LiteLLM key by design), while W and I each back up the key set they
+hold — a per-machine operator step, not something one backup on one host
+captures. `update.sh`'s post-update key check is role-aware for the same reason:
+on a `data` host it requires `valkey-password.key` and does not demand
+`master.key`.
+
+**Not yet a component:** the PostgreSQL control store
+([ADR-0014](decisions/ADR-0014-postgresql-control-store.md)) is not in the
+package's component list, so a backup taken today protects the keys and the
+durable token ledger only if the operator dumps the cluster separately:
+`backend/config/postgres/postgres.sh backup --out <dir>/control-store.dump`
+(restore with `postgres.sh restore --from <dump> --clean`). Adding a fifth
+component to `BackupManager`/`RestoreManager` — and to the restore drill's
+expectations — is outstanding work, not a claim.
+
 Out of scope: user workspace contents (`data/workspaces`) are **not** backed up —
 restore recreates an empty `0700` workspaces directory. Treat workspace data as
 ephemeral, or add it to the backup scope before relying on it. Runbooks

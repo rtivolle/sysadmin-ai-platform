@@ -346,9 +346,24 @@ if [ -f "$HARNESS_INSTALLER" ]; then
   "$HARNESS_INSTALLER" || warn "harness profile refresh failed; the gateway still re-stages the plugin on next start."
 fi
 
-# Post-update invariants: secrets must still exist and be non-empty.
-for key in master valkey-password; do
-  [ -s "${KEYS_DIR}/${key}.key" ] || fail postflight "post-update check: ${KEYS_DIR}/${key}.key is missing or empty — restore from backup immediately."
+# Post-update invariants: the secrets this machine's role needs must still
+# exist and be non-empty. A split host holds only its own subset
+# (docs/multi-host.md §3): the data tier has no LiteLLM master key by design,
+# so demanding it here would fail every update on D.
+DEPLOYMENT_ENV="${BACKEND_DIR}/config/roles/deployment.env"
+ROLE="all"
+if [ -f "$DEPLOYMENT_ENV" ]; then
+  recorded_role="$(sed -n 's/^ROLE=//p' "$DEPLOYMENT_ENV" | tail -n 1)"
+  if [ -n "$recorded_role" ]; then
+    ROLE="$recorded_role"
+  fi
+fi
+case "$ROLE" in
+  data) REQUIRED_KEY_FILES="valkey-password" ;;
+  *)    REQUIRED_KEY_FILES="master valkey-password" ;;
+esac
+for key in $REQUIRED_KEY_FILES; do
+  [ -s "${KEYS_DIR}/${key}.key" ] || fail postflight "post-update check: ${KEYS_DIR}/${key}.key is missing or empty (role=${ROLE}) — restore from backup immediately."
 done
 
 # ---------------------------------------------------------------------------

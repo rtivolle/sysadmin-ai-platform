@@ -1,7 +1,12 @@
 # ADR-0001: File-based bearer keys + Valkey replace PostgreSQL-backed LiteLLM virtual keys
 
 - **Date:** 2026-09-24
-- **Status:** Proposed — owner acceptance pending
+- **Status:** Proposed — owner acceptance pending. **Partially superseded by
+  [ADR-0014](ADR-0014-postgresql-control-store.md)**: file-provisioned keys remain
+  the source of key material, but key lifecycle (rotate/revoke) and the durable
+  daily token ledger now live in the local PostgreSQL control store, with the
+  auth gateway and quota manager failing closed (503) when it is selected and
+  unavailable. LiteLLM virtual keys (`/key/generate`) are still not implemented.
 - **Source of divergence:** `docs/specs/02 — Service Quotas & Passerelle API` (LiteLLM virtual-key provisioning via `/key/generate`, `database_url: redis://…`); `docs/plans/DEVELOPMENT_PLAN.md` §3 correction S4 and §4 architecture (`LiteLLM ---- PostgreSQL … durable ledger`); §5 backlog QUO-01 ("Keys survive restart; rotation/revocation work").
 
 ## Context
@@ -65,6 +70,13 @@ PostgreSQL-backed virtual-key store in this prototype.
 
 ## Corrective work
 
+- **Addressed by ADR-0014:** the bearer-key rotation/revocation mechanism is now
+  `services/control_store/key_store.py` (atomic rotate, audited revoke, hashed
+  storage) exposed through `POST /api/v1/admin/keys/{user}/rotate|revoke` and the
+  `control_store.cli` operator commands, with qualifying tests in
+  `test_control_store_keys.py`, `test_durable_identity.py` and
+  `test_quota_durable_ledger.py`. Restart durability is qualified for the ledger
+  (reconciliation floor) but **not** for keys against a live cluster.
 - Add a bearer-key rotation/revocation mechanism (an admin API that atomically
   replaces or removes a key file/entry, audited and replicated to every layer
   that loads keys) and tests pinning it.

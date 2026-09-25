@@ -159,6 +159,40 @@ Additional behaviour:
   permissive defaults. Process-local fallback is only for development runs
   without `VALKEY_URL`.
 
+## Control store (PostgreSQL)
+
+**Package:** `backend/services/control_store/` (optional; selected by
+`SYSADMIN_CONTROL_STORE=postgres`), lifecycle in
+`backend/config/postgres/postgres.sh`.
+
+A private, native PostgreSQL cluster (port 5433, data in
+`backend/data/postgres`) holding the two things that must outlive a restart:
+the **API-key lifecycle** (`sysadmin_api_keys`, hashes only, with atomic
+issue/rotate/revoke and an audit event per transition) and the **durable daily
+token ledger** (`sysadmin_token_ledger`). Valkey remains the atomic counter and
+lease store; PostgreSQL is the record.
+
+| Module | Role |
+|---|---|
+| `dsn.py` | mode selection and DSN resolution (env or `config/keys/postgres-password.key`); `redact()` is the only way a DSN is ever rendered |
+| `connection.py` | lazy driver import (`psycopg` or `psycopg2`) and a fail-closed DB-API wrapper |
+| `key_store.py` | `resolve` / `issue` / `rotate` / `revoke` / `import_file_keys`; stores `sha256(token)` and never the token |
+| `ledger.py` | `record_reservation` / `settle` / `record_direct_usage` / `durable_total` / `settle_expired` / `prune` |
+| `cli.py` | operator commands (`status`, `apply-schema`, `import-file-keys`, `issue`, `rotate`, `revoke`, `list`, `ledger`, `prune`) |
+
+Integration: `auth_gateway/server.py::resolve_identity` (shared by ForwardAuth and
+LiteLLM custom auth; the master credential always resolves to the admin identity)
+and `quota_manager`, which mirrors every reservation/settlement, records
+completion usage that arrives without a reservation, and reconciles the day's
+counter to the durable floor once per user/day per process. Both **fail closed**:
+with the store selected and unreachable they raise `ConnectionError` (503) rather
+than falling back to files or in-memory counters.
+
+See [configuration.md](configuration.md#7-durable-control-store-postgresql) and
+[ADR-0014](decisions/ADR-0014-postgresql-control-store.md). **Not yet wired into
+`platform.sh`** (deliberate — see the ADR), and no live cluster has been run in
+this environment.
+
 ---
 
 ## Approval gate

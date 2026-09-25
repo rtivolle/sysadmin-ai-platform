@@ -441,16 +441,30 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
 
   function serviceProbes() {
     const litellmBase = config.litellmUrl.replace(/\/v1\/?$/, '')
-    return [
+    const probes = [
       { name: 'auth_gateway', url: `${config.authUrl}/health` },
       { name: 'agent_tools', url: `${config.agentUrl}/health` },
       { name: 'litellm', url: `${litellmBase}/health/liveliness` },
       { name: 'victorialogs', url: `${config.victoriaLogsUrl}/health` },
       { name: 'traefik', url: `http://127.0.0.1:${config.services.traefik.port}/ping` },
-      { name: 'inference', url: `http://127.0.0.1:${config.services.inference.port}/health` },
-      { name: 'seaweedfs', url: `http://127.0.0.1:${config.services.seaweedfs.masterPort ?? 9333}/cluster/status` },
-      { name: 'valkey', tcp: { host: '127.0.0.1', port: config.services.valkey.port } },
     ]
+    // The inference engine binds loopback on the inference host by design, so a
+    // web or data host cannot reach it. When it is remote, emit no entry at all
+    // instead of reporting a service this host does not run as down.
+    if (config.services.inference.local !== false) {
+      probes.push({ name: 'inference', url: `http://127.0.0.1:${config.services.inference.port}/health` })
+    }
+    probes.push(
+      {
+        name: 'seaweedfs',
+        url: `http://${config.services.seaweedfs.host ?? '127.0.0.1'}:${config.services.seaweedfs.masterPort ?? 9333}/cluster/status`,
+      },
+      {
+        name: 'valkey',
+        tcp: { host: config.services.valkey.host ?? '127.0.0.1', port: config.services.valkey.port },
+      },
+    )
+    return probes
   }
 
   /** @param {{ name: string, url?: string, tcp?: { host: string, port: number } }} definition */

@@ -2,9 +2,14 @@
 
 Date: 24 September 2026. Status: **designed; PR-H1 implemented, not verified.**
 The role plumbing (role flags, role-aware `platform.sh`, config rendering,
-firewall rulesets, connectivity check) is implemented and unit-tested, but the
-topology has never been run on three machines. Operator guide:
-[docs/multi-host.md](../multi-host.md).
+firewall rulesets, connectivity check, role-scoped secrets and peer env) is
+implemented and unit-tested, but the topology has never been run on three
+machines. Operator guide: [docs/multi-host.md](../multi-host.md).
+
+The choice is **reversible and recorded**: `deployment.env` is written for
+every role (including `all`), omitting `--role` reuses the recorded role (so
+`./update.sh` never re-roles a host), and `--role all` restores the
+checked-in single-host configuration byte-for-byte. See §6 and §11.
 
 This document designs the split of the platform across three machines:
 
@@ -155,6 +160,25 @@ this in `docs/backup-restore.md`.
    peer addresses, generates only the configs the role needs (§7), and
    prints the exact key files the operator must copy to which machine (§5).
 
+What landed on top of the original design:
+
+- The same questions are available **unattended through both entrypoints**:
+  `install.sh --role ... --lan-bind-ip ... --peer-*` and
+  `install.sh --tui --role ... --lan-bind-ip ... --peer-*` (the TUI accepts
+  the flags and skips the questions it was given answers to).
+- `install.sh --dry-run` resolves and validates the role, prints the plan and
+  the services each role runs (`platform.sh roles`), and changes nothing.
+- Validation is fail-closed **before** any write: a split role bound to
+  loopback, or one whose peer addresses are loopback, exits `2`; a peer that
+  does not answer exits `1` with no `deployment.env`, no rendered config and
+  no keys written (the check runs against the resolved values, not a file).
+- `deployment.env` is written for **every** role, and `--role all` resets the
+  peers to loopback and re-renders the single-host files. Omitting `--role`
+  reuses the record, which is what keeps `./update.sh` (it calls
+  `install.sh` with no flags) from re-roling a machine mid-update.
+- `platform.sh roles` prints the role → service matrix and
+  `platform.sh status` additionally lists the peer endpoints this role reaches.
+
 `platform.sh start` reads the role and starts **only that machine's
 services**, exporting peer URLs (`LITELLM_URL`, `VALKEY_URL`,
 `VICTORIALOGS_URL`, `SYSADMIN_*`) built from the recorded addresses instead
@@ -176,6 +200,19 @@ Must become role/address-aware:
   `-httpListenAddr` (:146), SeaweedFS `-ip`/`-ip.bind` (:154-155), uvicorn
   `--host` (:176), port probe (:414), harness backend default (:338); plus
   role-filtered start/stop.
+  Also role-scoped secrets and peer env: `VALKEY_HOST`/`VALKEY_PORT` (ForwardAuth
+  builds its P1 store from these, **not** from `VALKEY_URL`), `SYSADMIN_VALKEY_HOST`
+  / `SYSADMIN_VALKEY_PORT`, `SYSADMIN_SEAWEEDFS_HOST` and
+  `SYSADMIN_INFERENCE_LOCAL` for the harness admin console; secret loading
+  requires `master.key` only on `all`/`web`/`inference` (the `data` tier holds
+  just `valkey-password.key`) and renders the runtime Valkey config only on the
+  host that serves Valkey, with the venv python or the system `python3`.
+- `backend/config/roles/render_config.py` — rendering is **reversible and
+  service-keyed**: the Valkey renderer owns the non-loopback `bind` entries
+  (so a LAN change replaces the old address and `all` removes it), and the
+  Traefik renderer rewrites the three managed upstreams by service name (so a
+  custom port is still rewritten) and reverts them on `all` only when they
+  currently point off-box.
 - `backend/config/valkey/valkey.conf` — `bind` (:2) becomes
   `bind 127.0.0.1 <D-LAN-address>` (loopback kept for D-local access such as
   the resilience manager's BGSAVE; LAN address added for W/I clients);
@@ -249,10 +286,20 @@ What landed (see [docs/multi-host.md](../multi-host.md) for the operator flow):
 - **`backend/installer_tui.py`** — role/peer prompt step, deployment.env write,
   connectivity check, and post-apply render.
 
-Open follow-ups encoded in this design (not yet done): `docs/backup-restore.md`
-still describes single-host key backup and must be updated to state that W/I key
-backup is a per-machine operator step and D's backup covers the state tier.
-`SYSADMIN_LITELLM_URL` and `VICTORIALOGS_URL` are exported by `platform.sh` so
-the harness admin console (W) sees the peer URLs; verify the console's
-`gateway/admin.js` audit/health paths against remote D before relying on them.
+Follow-ups from the original notes, now closed:
+
+- `docs/backup-restore.md` records the per-machine key scope of a split
+  deployment (W/I key backup is an operator step; D's backup covers the state
+  tier) and the role-aware `update.sh` postflight.
+- `SYSADMIN_LITELLM_URL` and `VICTORIALOGS_URL` are exported by `platform.sh`
+  so the harness admin console (W) sees the peer URLs. The console's health
+  panel is now peer-aware: the Valkey TCP probe and the SeaweedFS master probe
+  use `SYSADMIN_VALKEY_HOST` / `SYSADMIN_SEAWEEDFS_HOST`, and the
+  inference-engine probe is omitted (rather than reported `down`) when the
+  engine is remote, since it binds loopback on the inference host by design.
+  Its audit query already used `VICTORIALOGS_URL`. The `inferenceMode` label
+  still probes loopback and shows `unknown` on a web host.
+
+Still open: the whole topology remains **unverified on real machines** (§9), and
+inter-machine TLS is PR-H2.
 
