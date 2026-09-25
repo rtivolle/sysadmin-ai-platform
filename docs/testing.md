@@ -21,10 +21,6 @@ From repository root:
 
 ```bash
 make test
-make test-unit
-make test-sandbox
-make test-concurrency
-make test-recovery
 make test-live
 make benchmark
 make harness-test
