@@ -66,7 +66,7 @@ make harness-verify
 make compile
 ```
 
-Harness verification is covered by `make harness-test` and `make harness-verify`.
+Harness verification is covered by `make harness-test` and `make harness-verify`; see [`docs/testing.md`](docs/testing.md) for direct command-level details.
 
 ## Core components
 
