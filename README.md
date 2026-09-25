@@ -63,13 +63,14 @@ make test
 make test-live
 make benchmark
 make harness-test
+make harness-verify
 make compile
 ```
 
 Harness wiring verification can be run directly with:
 
 ```bash
-node packages/harness-integration/scripts/verify-harness.mjs
+node packages/harness-integration/scripts/verify-live-gateway.mjs
 ```
 
 ## Core components
