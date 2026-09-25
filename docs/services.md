@@ -15,6 +15,9 @@ replay worker. This document is a reference for each service and its state.
 | Valkey | native binary `valkey-server` | `127.0.0.1:6379` | yes |
 | audit outbox worker | `services/agent_tools/audit.py --worker` | n/a | yes |
 | Traefik | native binary `traefik` | `8080/8443/8081` | yes |
+| control store | `services/control_store/` | `127.0.0.1:5433` | optional (`SYSADMIN_CONTROL_STORE=postgres`) |
+| target executor | `services/target_executor/main.py` | CLI via sudo | systemd service (`sysadmin-target-exec`) |
+| observability collector | `services/observability/collector.py` | `127.0.0.1:9464` | optional / supervised |
 
 ---
 
@@ -346,3 +349,63 @@ context length, local vs remote mode) from detected GPU count/VRAM.
 expose it through the TUI. Results are exported to
 `backend/data/hardware_inventory.{json,md}`; admins can also read the current
 survey from `GET /api/v1/survey` on the agent platform.
+
+---
+
+## Target executor
+
+**Module:** `backend/services/target_executor/main.py`
+**Configuration:** `backend/config/target_executor/`
+
+A dedicated, least-privilege privileged daemon (PR-A1) running as root under a
+strictly hardened systemd unit (`sysadmin-target-exec.service`), invoked by the
+unprivileged `target_adapter` via `sudo` using a tightly scoped sudoers rule
+(`sudoers.d-sysadmin-target-exec`).
+
+- **Actions:** `service_status`, `service_restart`, `service_reload`, `config_install`,
+  `config_rollback`.
+- **Systemd sandboxing:** `ProtectSystem=strict`, `ProtectHome=read-only`,
+  `PrivateDevices=yes`, `ProtectKernelTunables=yes`, `ProtectControlGroups=yes`,
+  `RestrictAddressFamilies=AF_UNIX AF_NETLINK`, `NoNewPrivileges=yes`,
+  `CapabilityBoundingSet=CAP_KILL CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER`.
+- **Allowlist validation:** Reads `allowlist.json` (owned root:root 0600); validates
+  allowed unit names, configuration destination globs, and permitted backup paths.
+- **Fail-closed security:** Rejects path traversal (`..`), symlinks to non-allowlisted
+  destinations, content SHA-256 mismatches, out-of-band modifications, and unmanaged
+  units.
+
+See [backend/config/target_executor/SYSTEMD_HARDENING.md](../backend/config/target_executor/SYSTEMD_HARDENING.md).
+
+---
+
+## Observability
+
+**Package:** `backend/services/observability/`
+**Configuration:** `backend/config/observability/alerts.json`
+
+Stdlib-only monitoring and alerting subsystem (PR-D1) operating strictly outside
+platform services:
+
+- `collector.py` — scrapes loopback HTTP `/health` endpoints, Valkey RESP `PING`,
+  audit outbox size/age, backup freshness, host disk/RAM/load, and GPU telemetry
+  via `nvidia-smi`. Exports Prometheus text exposition on `:9464` or to a node-exporter
+  textfile, and emits a compact JSON summary to VictoriaLogs.
+- `alerts.py` — evaluates threshold rules from `alerts.json` (e.g. disk usage,
+  outbox backlog, quota rejection spikes, service downtime), tracks alert state, and
+  dispatches notifications to log sinks and operator runbooks in `docs/runbooks/`.
+
+See [observability.md](observability.md).
+
+---
+
+## Structured logging
+
+**Module:** `backend/services/logging_setup.py`
+
+Unified JSON logging across FastAPI services and background workers:
+
+- Emits single-line JSON records containing `timestamp`, `level`, `service`,
+  `message`, and contextual fields (`user_id`, `request_id`, `client_ip`).
+- Intercepts root and framework loggers (including FastAPI and Uvicorn).
+- Disables raw Uvicorn access logs (`access_log=False`) to eliminate duplicate
+  unformatted standard log lines while preserving structured audit events.

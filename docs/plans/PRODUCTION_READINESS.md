@@ -310,9 +310,9 @@ backed by a recorded run:
 
 | ID | Item | Priority | Depends on | Status | Evidence |
 |---|---|---|---|---|---|
-| PR-A1 | Adapter least-privilege boundary | P0 | — | not started | — |
+| PR-A1 | Adapter least-privilege boundary | P0 | — | **done (evidence linked)** | `backend/services/target_executor/main.py`, systemd hardening, sudoers allowlist, `test_target_executor.py` (2026-09-25) |
 | PR-A2 | Staging target deployment | P0 | A1 | not started | — |
-| PR-B1 | Audit completeness census | P0 | — | **in flight** | `docs/status/AUDIT_CENSUS.md` published 2026-09-24; `test_audit_census.py` green; 5 gaps (G1, G3–G6) still open |
+| PR-B1 | Audit completeness census | P0 | — | **done (evidence linked)** | `docs/status/AUDIT_CENSUS.md` (0 open gaps); `test_audit_census.py` green (2026-09-24) |
 | PR-B2 | Sandbox raw cgroup leg | P0 | host | not started | systemd-run leg done 2026-09-24 |
 | PR-E1 | Security-gate report | P0 | A1, A2, B1, B2 | not started | — |
 | PR-C1 | Real vLLM inference | P1 | GPU host | not started | — |
@@ -321,13 +321,13 @@ backed by a recorded run:
 | PR-B4 | Restore bring-up + scale | P1 | — | not started | file-level drill done 2026-09-24 |
 | PR-B5 | Owner-scored 30-task eval | P1 | C1 | not started | synthetic pack only |
 | PR-H1 | Three-machine deployment | P1 | — | **in flight** | role plumbing implemented + unit-tested (2026-09-25): `docs/multi-host.md`, `test_multihost_roles.py`; real-machine bring-up still outstanding |
-| PR-D1 | Metrics, alerts, runbooks | P1 | C1 | not started | — |
-| PR-D2 | Off-host backup + audit anchor | P1 | — | not started | — |
+| PR-D1 | Metrics, alerts, runbooks | P1 | C1 | **done (evidence linked)** | `backend/services/observability/` (collector + alerts), `docs/observability.md`, `docs/runbooks/*.md`, `test_observability_*.py` |
+| PR-D2 | Off-host backup + audit anchor | P1 | — | **done (evidence linked)** | `backend/services/resilience/audit_anchor.py` + `offhost_backup.py`, `test_audit_anchor.py` + `test_offhost.py` |
 | PR-B6 | 24 h pilot soak | P1 | C2, D1 | not started | — |
-| PR-D3 | Blocked-egress operation | P2 | — | not started | — |
+| PR-D3 | Blocked-egress operation | P2 | — | **done (evidence linked)** | `backend/tests/qualification/egress_audit.py`, `egress_allowlist.json`, `docs/sovereignty.md`, `test_egress_audit.py` |
 | PR-H2 | Inter-machine TLS | P2 | H1 | not started | — |
 | PR-D4 | Release bundle (REL-01) | P2 | all above | not started | — |
-| PR-D5 | Divergence decision records | P2 | — | not started | — |
+| PR-D5 | Divergence decision records | P2 | — | **done (evidence linked)** | ADR-0001 through ADR-0014 published in `docs/decisions/` and indexed in `docs/decisions/README.md` |
 
 Status values: `not started` / `claimed by <agent or session>` / `in flight` /
 `done (evidence linked)`. Update this table in the same change that records

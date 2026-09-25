@@ -27,7 +27,7 @@ requirement specifications:
 | Document | What it covers |
 |---|---|
 | [architecture.md](architecture.md) | System context, layers, trust boundaries and end-to-end request flows. |
-| [services.md](services.md) | The Python backend services: agent runtime, tools, auth gateway, quota, approval gate, target adapter, model manager, resilience, inference. |
+| [services.md](services.md) | The Python backend services: agent runtime, tools, auth gateway, quota, approval gate, control store, target adapter, target executor, model manager, observability, resilience, inference. |
 | [harness-integration.md](harness-integration.md) | The DeepSeek Harness package: multi-user gateway, per-user instance manager, backend-wiring plugin and profile. |
 | [security.md](security.md) | Identity, sandbox, approval gate, audit, threat model and known gaps. |
 | [http-api.md](http-api.md) | Every HTTP endpoint exposed by the platform. |
@@ -36,8 +36,12 @@ requirement specifications:
 | [update.md](update.md) | Platform self-update (`update.sh`): fast-forward/overlay module updates, options, invariants and rollback. |
 | [multi-host.md](multi-host.md) | One machine or a three-machine split (web/inference/data): choosing the role, staged bring-up, key copy, firewall, verification checklist. |
 | [configuration.md](configuration.md) | Configuration files, environment variables, ports and paths. |
-| [model-management.md](model-management.md) | Register, download and locally serve HuggingFace models through vLLM. |
-| [runbooks/vast-deepseek.md](runbooks/vast-deepseek.md) | Operator recipe for a remote multi-GPU deployment: the measured 4×H200 DeepSeek setup, CUDA/JIT prerequisites, DSH wiring and acceptance tests. |
+| [model-management.md](model-management.md) | Register, download and locally serve HuggingFace models through vLLM and llama.cpp. |
+| [nvidia-vllm.md](nvidia-vllm.md) | Ubuntu NVIDIA driver detection, optional CUDA toolkit, and native vLLM configuration. |
+| [observability.md](observability.md) | Out-of-process metrics collector, alerting engine, Prometheus exposition, and VictoriaLogs summary. |
+| [sovereignty.md](sovereignty.md) | Sovereign / blocked-egress operation: air-gap verification, mirror manifests, and egress census. |
+| [runbooks/](runbooks/) | Operator runbooks: alert remediation recipes and the multi-GPU Vast/H200 recipe ([runbooks/vast-deepseek.md](runbooks/vast-deepseek.md)). |
+| [decisions/README.md](decisions/README.md) | Architectural Decision Records (ADR-0001 through ADR-0014). |
 | [backup-restore.md](backup-restore.md) | Backup, clean-staging restore and the disaster-recovery drill. |
 | [testing.md](testing.md) | Test tiers, how to run them, recorded results and environment limits. |
 | [development.md](development.md) | Repository layout, conventions and extension points. |
@@ -48,18 +52,23 @@ requirement specifications:
 | [plans/MULTI_HOST_DEPLOYMENT.md](plans/MULTI_HOST_DEPLOYMENT.md) | Three-machine topology design (web/inference/data): placement, firewall matrices, secret distribution, setup prompts. |
 | [status/TEST_READY.md](status/TEST_READY.md) | Current verification results, environment limits and host notes. |
 | [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md) | Event-by-event audit completeness census, canonical schema and open gaps. |
+| [status/CONTROL_STORE.md](status/CONTROL_STORE.md) | PostgreSQL control store status: schema, durable quota ledger, key store, and migration. |
 | [status/BENCHMARK_REPORT.md](status/BENCHMARK_REPORT.md) | M4 soak qualification and the later re-verification addendum. |
 
 ## Reading paths
 
 - **Operator / sysadmin** — start with [operations.md](operations.md), then
-  [update.md](update.md), [tools.md](tools.md), then [security.md](security.md).
+  [update.md](update.md), [multi-host.md](multi-host.md), [observability.md](observability.md),
+  [tools.md](tools.md), then [security.md](security.md).
 - **Reviewer / security** — [architecture.md](architecture.md),
-  [security.md](security.md), [testing.md](testing.md).
+  [security.md](security.md), [sovereignty.md](sovereignty.md), [testing.md](testing.md),
+  [decisions/README.md](decisions/README.md).
 - **Developer** — [development.md](development.md), [architecture.md](architecture.md),
-  [services.md](services.md), [harness-integration.md](harness-integration.md).
+  [services.md](services.md), [harness-integration.md](harness-integration.md),
+  [model-management.md](model-management.md).
 - **Auditor** — [security.md](security.md), [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md),
-  [backup-restore.md](backup-restore.md), [configuration.md](configuration.md).
+  [backup-restore.md](backup-restore.md), [configuration.md](configuration.md),
+  [status/CONTROL_STORE.md](status/CONTROL_STORE.md).
 - **Agent / automated contributor** — [`../AGENTS.md`](../AGENTS.md) first, then
   [development.md](development.md) and [testing.md](testing.md).
 

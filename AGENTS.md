@@ -39,21 +39,30 @@ backend/
     agent_tools/              bounded tools, audit, HTTP server
     approval_gate/            destructive filter, HITL state machine, Valkey store
     auth_gateway/             ForwardAuth, quota/lease manager, P1 elevation, LiteLLM auth
+    control_store/            PostgreSQL durable quota ledger, key store, schema & CLI (ADR-0014)
     inference_engine/         OpenAI-compatible simulator / vLLM proxy
+    model_manager/            local model lifecycle, vLLM / llama.cpp servers, registry
+    observability/            metrics collector, alert evaluator, Prometheus exporter
+    resilience/               backup, restore, DR drill, audit anchor, off-host backup
     target_adapter/           scoped service actions and staged config deployment
-    resilience/               backup, restore, DR drill
+    target_executor/          hardened privileged execution daemon, systemd sandbox, sudoers
     hardware_survey.py        host inventory
-  config/                     traefik, valkey, litellm, sandbox, seaweedfs, victorialogs, keys (local)
+    logging_setup.py          structured JSON logging
+  config/                     traefik, valkey, postgres, roles, firewall, target_executor, vllm, observability, litellm, sandbox, seaweedfs, victorialogs, keys (local)
   tests/                      tiered pytest suites (see §6)
   data/                       runbooks (tracked) + runtime state (Git-ignored)
   bin/                        downloaded static binaries (Git-ignored)
 
 packages/harness-integration/ DeepSeek Harness profile, plugin, multi-user gateway
 docs/                         documentation set (start at docs/README.md)
+  decisions/                  Architectural Decision Records (ADRs 0001–0014)
+  runbooks/                   alert runbooks and operator recipes
   specs/                      the six source specifications (French, .docx + .txt)
   plans/DEVELOPMENT_PLAN.md   implementation baseline and backlog
   plans/PRODUCTION_READINESS.md  prioritized production-readiness work items and tracking
-  plans/MULTI_HOST_DEPLOYMENT.md  three-machine topology design (unimplemented; PR-H1)
+  plans/MULTI_HOST_DEPLOYMENT.md  three-machine topology design (PR-H1 role plumbing implemented)
+  status/CONTROL_STORE.md     PostgreSQL control store status and verification
+  status/AUDIT_CENSUS.md      event-by-event audit completeness census
   status/TEST_READY.md        current verification results and limits
   status/BENCHMARK_REPORT.md  M4 qualification report + re-verification addendum
 ```
@@ -111,10 +120,15 @@ per-user bearer keys from those files.
 | Add or change a bounded tool | `backend/services/agent_tools/tools.py`, `backend/services/agent_runtime/tool_registry.py`, `backend/services/agent_tools/server.py`; tests in `tier1_unit`; doc in `docs/tools.md` |
 | Quota, lease, RPM/TPM or daily budget | `backend/services/auth_gateway/quota_manager.py` + `litellm_auth.py`; tests in `tier1_unit/test_quota_fail_closed.py`, `tier1_unit/test_daily_token_reservation.py`, `tier3_concurrency/` |
 | Approval flow or destructive filter | `backend/services/approval_gate/` (Python) **and** `packages/harness-integration/dsh-plugin-sysadmin/lib/policy.js` |
-| Target adapter action | `backend/services/target_adapter/config.py`, `adapter.py`, then `service_manager.py`/`config_deployer.py`; tests in `tier1_unit` + `tier3_concurrency` |
+| Target adapter & executor boundary | `backend/services/target_adapter/`, `backend/services/target_executor/`, `backend/config/target_executor/`; tests in `tier1_unit/test_target_*.py` + `tier3_concurrency` |
 | Sandbox limits or mounts | `backend/config/sandbox/bwrap-runner.sh`; verify with `tier2_sandbox` on a host with cgroups v2 |
-| Audit schema or outbox | `backend/services/agent_tools/audit.py`; keep the JS audit writer in sync; tests in `tier4_recovery` |
-| Backup / restore / DR | `backend/services/resilience/`; tests in `tier4_recovery` |
+| Audit schema, outbox, anchor | `backend/services/agent_tools/audit.py`, `backend/services/resilience/audit_anchor.py`; keep JS audit writer in sync; tests in `tier1_unit/test_audit_census.py` + `tier4_recovery` |
+| Backup / restore / off-host sync | `backend/services/resilience/` (`backup_manager.py`, `restore_manager.py`, `offhost_backup.py`); tests in `tier4_recovery` |
+| Model management & serving | `backend/services/model_manager/` (vLLM / llama.cpp servers, registry); tests in `tier1_unit/test_model_manager.py`; doc in `docs/model-management.md` |
+| Control store (PostgreSQL) | `backend/services/control_store/`, `backend/config/postgres/`; tests in `tier1_unit/test_control_store_*`; doc in `docs/status/CONTROL_STORE.md` |
+| Observability & alerting | `backend/services/observability/` (collector, alerts), `backend/config/observability/`; tests in `tier1_unit/test_observability_*`; doc in `docs/observability.md` |
+| Machine roles & multi-host | `backend/config/roles/`, `backend/config/firewall/`, `backend/platform.sh`; tests in `tier1_unit/test_multihost_*`; doc in `docs/multi-host.md` |
+| Platform self-update | `update.sh`; tests in `tier1_unit/test_update_script.py`; doc in `docs/update.md` |
 | Traefik routes or middleware | `backend/config/traefik/dynamic.yml`; doc in `docs/http-api.md` |
 | Harness profile or gateway | `packages/harness-integration/`; doc in `docs/harness-integration.md` |
 | Documentation | `docs/` (index: `docs/README.md`); verification results: `docs/status/TEST_READY.md` |
@@ -127,6 +141,8 @@ per-user bearer keys from those files.
 | Quota, approval, runtime, adapter | `backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit backend/tests/tier3_concurrency -q` |
 | Sandbox, workspaces | `backend/.venv/bin/python3 -m pytest backend/tests/tier2_sandbox -q` |
 | Audit, outbox, backup/restore | `backend/.venv/bin/python3 -m pytest backend/tests/tier4_recovery -q` |
+| Observability, alerts | `backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit/test_observability_* -q` |
+| Control store, machine roles | `backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit/test_control_store_* backend/tests/tier1_unit/test_multihost_* -q` |
 | Tools, prompts, rubrics | `make benchmark` |
 | Service wiring, ports, Traefik | `make start && make test-live` (needs a free port 3080) |
 | Harness package | `make harness-test && make harness-verify` |
@@ -146,13 +162,11 @@ tests + 8/8 dsh checks + 37/37 live gateway checks** (`make harness-test`,
 Treat these as a regression baseline, not a production acceptance certificate,
 and record new measurements in `docs/status/TEST_READY.md`.
 
-Current worktree baseline (2026-09-24): **530 tests collected**; with every
-backend service stopped **509 passed, 21 skipped**. The 21 skips are the seven
-live `test_platform.py` sections, one live admin-quota check, two live
-daily-token reservation checks, and eleven auth/Traefik/Valkey challenger
-checks. They are unavailable integration checks, not passing coverage. The
-current count includes model-manager vLLM/GGUF unit coverage; real manager-
-mediated GGUF download and GPU service startup remain separate live checks.
+Worktree baseline following observability, logging, target executor, control store
+and machine-role tiers: **729+ passed, 2 skipped** (the skips are optional
+ShellCheck checks where `shellcheck` is absent). On the harness side: **60 tests,
+59 passed, 1 pre-existing skip** (`make harness-test`). See `docs/status/TEST_READY.md`
+for the exact session breakdown and per-tier measurements.
 
 ## 7. Environment notes
 
