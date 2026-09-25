@@ -25,7 +25,6 @@ make test-live
 make benchmark
 make harness-test
 make harness-verify
-make stress-sandbox
 make compile
 ```
 
