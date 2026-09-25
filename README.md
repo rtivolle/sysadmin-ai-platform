@@ -66,12 +66,7 @@ make harness-verify
 make compile
 ```
 
-Harness verification should include both package tests and live gateway checks:
-
-```bash
-node --test ./packages/harness-integration/tests/
-node ./packages/harness-integration/scripts/verify-live-gateway.mjs
-```
+Harness verification is covered by `make harness-test` and `make harness-verify`.
 
 ## Core components
 

@@ -65,6 +65,6 @@ After changing:
 - **Runtime/quota/approval/adapter**: Tier 1 + Tier 3
 - **Sandbox/workspace isolation**: Tier 2
 - **Audit/outbox/backup/restore**: Tier 4
-- **Harness integration**: `make harness-test` + `make harness-verify` (manual commands: `node --test ./packages/harness-integration/tests/` for package tests, plus `node ./packages/harness-integration/scripts/verify-live-gateway.mjs` for live gateway verification)
+- **Harness integration**: `make harness-test` + `make harness-verify`
 - **Compile sanity check**: `make compile`
 - **User-visible docs or claims**: update corresponding docs and `status/TEST_READY.md` evidence where applicable
