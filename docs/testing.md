@@ -64,7 +64,7 @@ backend/.venv/bin/python3 -m pytest backend/tests/e2e/test_30_tasks.py -q
 After changing:
 
 - **General backend logic**: `make test`
-- **Runtime/quota/approval/target-adapter (focused, in addition to `make test`)**: Tier 1 + Tier 3 (`backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit backend/tests/tier3_concurrency -q`)
+- **Runtime/quota/approval/target-adapter (focused alternative while iterating, instead of full `make test`)**: Tier 1 + Tier 3 (`backend/.venv/bin/python3 -m pytest backend/tests/tier1_unit backend/tests/tier3_concurrency -q`)
 - **Sandbox/workspace isolation**: Tier 2
 - **Audit/outbox/backup/restore**: Tier 4 (`backend/.venv/bin/python3 -m pytest backend/tests/tier4_recovery -q`)
 - **Service wiring / ports / Traefik routes**: `make start && make test-live`
