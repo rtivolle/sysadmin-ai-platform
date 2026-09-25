@@ -29,6 +29,15 @@ Stop services:
 ./platform.sh stop
 ```
 
+Equivalent Make workflow:
+
+```bash
+make install
+make start
+make status
+make stop
+```
+
 Optional install modes:
 
 - `./install.sh --tui` (interactive setup wizard)
@@ -48,7 +57,7 @@ Optional install modes:
 - LiteLLM (`127.0.0.1:4000`)
 - Traefik (`:8080/:8443`)
 
-This is the intended default stack; ensure the agent port (`3080`) is free before startup.
+This is the intended default stack; ensure the agent port (`3080` by default, override with `SYSADMIN_AGENT_PORT`) is free before startup.
 
 Harness integration is optional; see [`docs/harness-integration.md`](docs/harness-integration.md).
 
