@@ -287,11 +287,12 @@ export function createGateway({
    * @param {URL} url
    */
   function proxyHttp(req, res, instance, url) {
-    const headers = browserProxyHeaders(req.headers, { host: config.instanceHost, port: instance.port })
+    const targetHost = instance.targetHost || instance.guestIp || config.instanceHost
+    const headers = browserProxyHeaders(req.headers, { host: targetHost, port: instance.port })
 
     const upstream = httpRequest(
       {
-        host: config.instanceHost,
+        host: targetHost,
         port: instance.port,
         method: req.method,
         path: req.url,
@@ -373,8 +374,9 @@ export function createGateway({
 
     const instance = await instances.ensure(session.userId)
     instances.touch?.(session.userId)
-    const upstream = netConnect(instance.port, config.instanceHost, () => {
-      const headers = browserProxyHeaders(req.headers, { host: config.instanceHost, port: instance.port })
+    const targetHost = instance.targetHost || instance.guestIp || config.instanceHost
+    const upstream = netConnect(instance.port, targetHost, () => {
+      const headers = browserProxyHeaders(req.headers, { host: targetHost, port: instance.port })
       const lines = [`${req.method} ${req.url} HTTP/1.1`]
       for (const [name, value] of Object.entries(headers)) {
         if (value === undefined) continue

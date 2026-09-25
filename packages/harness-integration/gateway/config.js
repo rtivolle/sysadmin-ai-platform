@@ -52,6 +52,12 @@ export function loadConfig(env = process.env) {
     instanceLogDir: env.SYSADMIN_INSTANCE_LOG_DIR ?? join(stateRoot, 'logs'),
 
     dshBin: env.DSH_BIN ?? 'dsh',
+    dshRunnerBin: env.DSH_RUNNER_BIN ?? resolve(HERE, '..', 'sandbox', 'dsh-runner.sh'),
+    sandboxEnabled: env.SYSADMIN_SANDBOX_DISABLED !== '1',
+    sandboxMock: env.SYSADMIN_SANDBOX_MOCK === '1',
+    netnsEnabled: env.SYSADMIN_NETNS_DISABLED !== '1',
+    netnsMock: env.SYSADMIN_NETNS_MOCK === '1' || process.platform === 'darwin',
+    defaultNetworkTier: toInt(env.SYSADMIN_DEFAULT_NETWORK_TIER, 0),
     profileName: env.SYSADMIN_PROFILE ?? 'sysadmin',
     profileSource: env.SYSADMIN_PROFILE_SOURCE ?? resolve(HERE, '..', 'profile'),
     pluginSource: env.SYSADMIN_PLUGIN_SOURCE ?? resolve(HERE, '..', 'dsh-plugin-sysadmin'),

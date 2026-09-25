@@ -26,12 +26,13 @@
  */
 import { spawn } from 'node:child_process'
 import {
-  appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync,
+  appendFileSync, chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync,
   renameSync, rmSync, statSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { trustedHostList } from './config.js'
+import { NetnsManager } from './netns-manager.js'
 import { readJsonFile, removeFile, writeFileAtomic } from './state-file.js'
 
 const LAUNCH_TOKEN_PATTERN = /https?:\/\/[^\s"'<>]*[?&]token=([A-Za-z0-9._~-]+)/
@@ -59,8 +60,34 @@ export class HarnessInstance {
    * @param {string} options.outboxPath
    * @param {boolean} [options.adopted]
    * @param {number} [options.startedAt]
+   * @param {string|null} [options.netns]
+   * @param {string|null} [options.hostIp]
+   * @param {string|null} [options.guestIp]
+   * @param {string|null} [options.targetHost]
+   * @param {number} [options.tier]
+   * @param {string[]} [options.whitelistedCidrs]
+   * @param {string|null} [options.hostVeth]
+   * @param {string|null} [options.guestVeth]
    */
-  constructor({ userId, port, child = null, pid = null, home, workspace, outboxPath, adopted = false, startedAt = Date.now() }) {
+  constructor({
+    userId,
+    port,
+    child = null,
+    pid = null,
+    home,
+    workspace,
+    outboxPath,
+    adopted = false,
+    startedAt = Date.now(),
+    netns = null,
+    hostIp = null,
+    guestIp = null,
+    targetHost = null,
+    tier = 0,
+    whitelistedCidrs = [],
+    hostVeth = null,
+    guestVeth = null,
+  }) {
     this.userId = userId
     this.port = port
     this.child = child
@@ -83,10 +110,18 @@ export class HarnessInstance {
     this.stopping = false
     /** @type {NodeJS.Timeout|null} */
     this.restartTimer = null
+    this.netns = netns
+    this.hostIp = hostIp
+    this.guestIp = guestIp
+    this.targetHost = targetHost ?? (guestIp || '127.0.0.1')
+    this.tier = tier
+    this.whitelistedCidrs = whitelistedCidrs
+    this.hostVeth = hostVeth
+    this.guestVeth = guestVeth
   }
 
   get url() {
-    return `http://127.0.0.1:${this.port}`
+    return `http://${this.targetHost || this.guestIp || '127.0.0.1'}:${this.port}`
   }
 
   get running() {
@@ -138,10 +173,12 @@ export class InstanceManager {
    * @param {object} options
    * @param {ReturnType<import('./config.js').loadConfig>} options.config
    * @param {(message: string, meta?: unknown) => void} [options.logger]
+   * @param {NetnsManager} [options.netnsManager]
    */
-  constructor({ config, logger = () => {} }) {
+  constructor({ config, logger = () => {}, netnsManager = null }) {
     this.config = config
     this.log = logger
+    this.netnsManager = netnsManager ?? new NetnsManager({ config, logger })
     /** @type {Map<string, HarnessInstance>} */
     this.instances = new Map()
     /** @type {Map<string, Promise<HarnessInstance>>} */
@@ -250,7 +287,10 @@ export class InstanceManager {
   async #stopLocked(userId) {
     const instance = this.instances.get(userId)
     this.#removeRegistry(userId)
-    if (!instance) return false
+    if (!instance) {
+      await this.netnsManager?.teardown(userId).catch(() => {})
+      return false
+    }
     if (instance.restartTimer) {
       clearTimeout(instance.restartTimer)
       instance.restartTimer = null
@@ -259,6 +299,7 @@ export class InstanceManager {
     await this.#terminate(instance)
     instance.state = 'stopped'
     this.instances.delete(userId)
+    await this.netnsManager?.teardown(userId).catch(() => {})
     return true
   }
 
@@ -305,7 +346,8 @@ export class InstanceManager {
     const result = { adopted: [], dropped: [], unknownOwner: [] }
     for (const [userId, record] of this.readRegistry().entries()) {
       const alive = record.pid !== null && processAlive(record.pid)
-      const answering = await isPortAnswering(this.config.instanceHost, record.port)
+      const targetHost = record.targetHost || this.config.instanceHost
+      const answering = await isPortAnswering(targetHost, record.port)
       if (alive && answering) {
         const instance = new HarnessInstance({
           userId,
@@ -316,6 +358,11 @@ export class InstanceManager {
           outboxPath: join(this.config.stateRoot, 'audit', `${userId}-outbox.jsonl`),
           adopted: true,
           startedAt: record.startedAt,
+          netns: record.netns ?? null,
+          hostIp: record.hostIp ?? null,
+          guestIp: record.guestIp ?? null,
+          targetHost: record.targetHost ?? null,
+          tier: record.tier ?? 0,
         })
         instance.state = 'running'
         this.instances.set(userId, instance)
@@ -392,6 +439,11 @@ export class InstanceManager {
       lastActivityAt: instance.lastActivityAt,
       restarts: instance.restartAttempts,
       failureReason: instance.failureReason,
+      netns: instance.netns,
+      hostIp: instance.hostIp,
+      guestIp: instance.guestIp,
+      tier: instance.tier,
+      targetHost: instance.targetHost,
     }))
   }
 
@@ -410,6 +462,11 @@ export class InstanceManager {
       lastActivityAt: instance.lastActivityAt,
       restarts: instance.restartAttempts,
       failureReason: instance.failureReason,
+      netns: instance.netns,
+      hostIp: instance.hostIp,
+      guestIp: instance.guestIp,
+      tier: instance.tier,
+      targetHost: instance.targetHost,
     }
   }
 
@@ -468,6 +525,11 @@ export class InstanceManager {
         startedAt: Number(record.startedAt) || Date.now(),
         home: typeof record.home === 'string' ? record.home : '',
         workspace: typeof record.workspace === 'string' ? record.workspace : '',
+        netns: typeof record.netns === 'string' ? record.netns : null,
+        hostIp: typeof record.hostIp === 'string' ? record.hostIp : null,
+        guestIp: typeof record.guestIp === 'string' ? record.guestIp : null,
+        targetHost: typeof record.targetHost === 'string' ? record.targetHost : null,
+        tier: Number.isInteger(record.tier) ? record.tier : 0,
       })
     }
     return entries
@@ -500,6 +562,11 @@ export class InstanceManager {
       profileSource: config.profileSource,
       pluginSource: config.pluginSource,
     })
+    try {
+      chmodSync(home, 0o700)
+    } catch {
+      /* best effort on filesystems without POSIX modes */
+    }
     mkdirSync(workspace, { recursive: true, mode: 0o700 })
     try {
       chmodSync(workspace, 0o700)
@@ -507,10 +574,44 @@ export class InstanceManager {
       /* best effort on filesystems without POSIX modes */
     }
     mkdirSync(join(config.stateRoot, 'audit'), { recursive: true, mode: 0o700 })
+    try {
+      const fd = openSync(outboxPath, 'a', 0o600)
+      closeSync(fd)
+      chmodSync(outboxPath, 0o600)
+    } catch {
+      /* best effort on filesystems without POSIX modes */
+    }
 
     const port = await this.#choosePort(userId, preferredPort)
     const instance = new HarnessInstance({ userId, port, home, workspace, outboxPath })
     this.instances.set(userId, instance)
+
+    if (config.netnsEnabled !== false) {
+      try {
+        const preferredSlot = preferredPort ? (preferredPort - config.instancePortStart + 1) : null
+        const alloc = await this.netnsManager.allocate(userId, {
+          port,
+          preferredSlot,
+          tier: config.defaultNetworkTier ?? 0,
+        })
+        instance.netns = alloc.netnsName
+        instance.hostIp = alloc.hostIp
+        instance.guestIp = alloc.guestIp
+        instance.targetHost = alloc.targetHost
+        instance.hostVeth = alloc.hostVeth
+        instance.guestVeth = alloc.guestVeth
+        instance.tier = alloc.tier
+        instance.whitelistedCidrs = alloc.whitelistedCidrs
+
+        await this.netnsManager.applyTier(userId, instance.tier, instance.whitelistedCidrs)
+      } catch (netnsError) {
+        instance.state = 'failed'
+        instance.exitCode = 126
+        instance.failureReason = 'Network namespace or isolation failure (exit 126)'
+        this.log(`netns setup failed for ${userId}: ${netnsError instanceof Error ? netnsError.message : String(netnsError)}`)
+        throw netnsError
+      }
+    }
 
     this.log(`starting harness for ${userId} on port ${port}`)
     try {
@@ -519,7 +620,14 @@ export class InstanceManager {
     } catch (error) {
       if (instance.child) instance.child.kill('SIGKILL')
       instance.state = 'failed'
-      this.instances.delete(userId)
+      if (instance.exitCode === 126) {
+        instance.failureReason = instance.failureReason || 'Sandbox limit or security validation failure (exit 126)'
+      } else {
+        this.instances.delete(userId)
+      }
+      if (instance.netns) {
+        this.netnsManager?.teardown(userId).catch(() => {})
+      }
       throw error
     }
     instance.state = 'running'
@@ -538,6 +646,10 @@ export class InstanceManager {
     const { config } = this
     const token = readUserToken(config.keysDir, instance.userId)
     const trustedHosts = trustedHostList(process.env)
+    if (instance.hostIp && !trustedHosts.includes(instance.hostIp)) trustedHosts.push(instance.hostIp)
+    if (instance.guestIp && !trustedHosts.includes(instance.guestIp)) trustedHosts.push(instance.guestIp)
+
+    const isNetnsActive = Boolean(instance.netns && !this.netnsManager?.isMock)
     const env = {
       ...process.env,
       DSH_HOME: instance.home,
@@ -545,12 +657,12 @@ export class InstanceManager {
       SYSADMIN_USER: instance.userId,
       SYSADMIN_TOKEN: token,
       SYSADMIN_LITELLM_KEY: token,
-      SYSADMIN_LITELLM_URL: config.litellmUrl,
-      SYSADMIN_BACKEND_URL: config.agentUrl,
-      SYSADMIN_AUTH_URL: config.authUrl,
-      VICTORIALOGS_URL: config.victoriaLogsUrl,
+      SYSADMIN_LITELLM_URL: isNetnsActive ? `http://${instance.hostIp}:4000/v1` : config.litellmUrl,
+      SYSADMIN_BACKEND_URL: isNetnsActive ? `http://${instance.hostIp}:3080` : config.agentUrl,
+      SYSADMIN_AUTH_URL: isNetnsActive ? `http://${instance.hostIp}:3081` : config.authUrl,
+      VICTORIALOGS_URL: isNetnsActive ? `http://${instance.hostIp}:9428` : config.victoriaLogsUrl,
       SYSADMIN_AUDIT_OUTBOX: instance.outboxPath,
-      SYSADMIN_HARNESS_HOST: config.instanceHost,
+      SYSADMIN_HARNESS_HOST: isNetnsActive ? '0.0.0.0' : config.instanceHost,
       SYSADMIN_HARNESS_PORT: String(instance.port),
       // Port-less LAN addresses plus SYSADMIN_TRUSTED_HOSTS. The profile
       // hands these to the harness Origin fence so a browser on the gateway
@@ -558,9 +670,29 @@ export class InstanceManager {
       SYSADMIN_TRUSTED_HOSTS: trustedHosts.join(','),
     }
     this.log(`harness for ${instance.userId} trusts ${trustedHosts.length > 0 ? trustedHosts.join(',') : 'loopback only'}`)
+    let spawnBin = config.dshBin
+    let spawnArgs = ['--profile', config.profileName, '--no-open', '--port', String(instance.port)]
+
+    if (config.sandboxEnabled !== false) {
+      spawnBin = config.dshRunnerBin
+      const runnerArgs = [
+        '--user', instance.userId,
+        '--home', instance.home,
+        '--workspace', instance.workspace,
+      ]
+      if (instance.netns) {
+        runnerArgs.push('--netns', instance.netns)
+      }
+      if (config.sandboxMock) {
+        runnerArgs.push('--mock')
+      }
+      runnerArgs.push('--', config.dshBin, ...spawnArgs)
+      spawnArgs = runnerArgs
+    }
+
     const child = spawn(
-      config.dshBin,
-      ['--profile', config.profileName, '--no-open', '--port', String(instance.port)],
+      spawnBin,
+      spawnArgs,
       { cwd: instance.workspace, env, stdio: ['ignore', 'pipe', 'pipe'] },
     )
     instance.attachChild(child)
@@ -594,12 +726,27 @@ export class InstanceManager {
     this.log(`harness for ${instance.userId} exited (code=${code} signal=${signal})`)
     if (this.stopping || instance.stopping || instance.state === 'stopped') {
       instance.state = 'stopped'
+      if (instance.netns) {
+        this.netnsManager?.teardown(instance.userId).catch(() => {})
+      }
+      return
+    }
+    if (code === 126) {
+      instance.state = 'failed'
+      instance.failureReason = instance.failureReason || 'Sandbox limit or security validation failure (exit 126)'
+      this.log(`harness for ${instance.userId} failed closed: sandbox limit or security validation failure (exit 126)`)
+      if (instance.netns) {
+        this.netnsManager?.teardown(instance.userId).catch(() => {})
+      }
       return
     }
     if (instance.restartAttempts >= this.config.restartMaxAttempts) {
       instance.state = 'failed'
       instance.failureReason = `exited (code=${code} signal=${signal}); last output: ${instance.stderrTail.slice(-400).trim()}`
       this.log(`harness for ${instance.userId} failed after ${instance.restartAttempts} restart(s)`)
+      if (instance.netns) {
+        this.netnsManager?.teardown(instance.userId).catch(() => {})
+      }
       return
     }
     this.#scheduleRestart(instance)
@@ -640,7 +787,10 @@ export class InstanceManager {
       }
       const message = error instanceof Error ? error.message : String(error)
       this.log(`restart attempt ${instance.restartAttempts} for ${instance.userId} failed: ${message}`)
-      if (instance.restartAttempts >= this.config.restartMaxAttempts) {
+      if (instance.exitCode === 126) {
+        instance.state = 'failed'
+        instance.failureReason = 'Sandbox limit or security validation failure (exit 126)'
+      } else if (instance.restartAttempts >= this.config.restartMaxAttempts) {
         instance.state = 'failed'
         instance.failureReason = message
       } else if (!instance.restartTimer) {
@@ -703,6 +853,11 @@ export class InstanceManager {
         startedAt: instance.startedAt,
         home: instance.home,
         workspace: instance.workspace,
+        netns: instance.netns ?? null,
+        hostIp: instance.hostIp ?? null,
+        guestIp: instance.guestIp ?? null,
+        targetHost: instance.targetHost ?? null,
+        tier: instance.tier ?? 0,
       }, null, 2)}\n`)
     } catch (error) {
       this.log(`failed to persist registry entry for ${instance.userId}: ${error instanceof Error ? error.message : String(error)}`)
@@ -720,7 +875,12 @@ export class InstanceManager {
    * @param {HarnessInstance} instance
    */
   async #terminate(instance) {
-    if (!instance.running) return
+    if (!instance.running) {
+      if (instance.netns) {
+        await this.netnsManager?.teardown(instance.userId).catch(() => {})
+      }
+      return
+    }
     instance.stop('SIGTERM')
     const deadline = Date.now() + STOP_GRACE_MS
     while (Date.now() < deadline && instance.running) await delay(100)
@@ -728,6 +888,9 @@ export class InstanceManager {
       this.log(`harness for ${instance.userId} ignored SIGTERM; sending SIGKILL`)
       instance.stop('SIGKILL')
       for (let i = 0; i < 20 && instance.running; i += 1) await delay(50)
+    }
+    if (instance.netns) {
+      await this.netnsManager?.teardown(instance.userId).catch(() => {})
     }
   }
 
@@ -787,6 +950,12 @@ export class InstanceManager {
  * home's sessions/storages are left untouched.
  */
 export function provisionProfile({ home, profileName, profileSource, pluginSource }) {
+  mkdirSync(home, { recursive: true, mode: 0o700 })
+  try {
+    chmodSync(home, 0o700)
+  } catch {
+    /* best effort on filesystems without POSIX modes */
+  }
   const profileDir = join(home, 'profiles', profileName)
   const nodeModules = join(profileDir, 'node_modules')
   mkdirSync(nodeModules, { recursive: true })
