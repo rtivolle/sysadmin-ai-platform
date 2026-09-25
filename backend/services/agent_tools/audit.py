@@ -242,5 +242,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not args.worker or args.interval <= 0:
         parser.error("--worker and a positive --interval are required")
-    logging.basicConfig(level=logging.INFO)
+    from services.logging_setup import configure, get_logger, log_event
+    configure("audit_outbox")
+    log_event(get_logger("audit_outbox.worker"), "worker_start",
+              "audit outbox worker starting", fields={"interval_seconds": args.interval})
     run_outbox_worker(args.interval)

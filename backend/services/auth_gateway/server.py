@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import secrets
+import asyncio
 import hashlib
 import hmac
 import datetime
@@ -30,7 +31,26 @@ try:
 except ImportError:
     from quota_manager import QuotaManager, QuotaExceededException, quota_mgr
 
+from services.agent_tools.audit import log_audit_event
+from services.logging_setup import RequestLoggingMiddleware, configure, get_logger, log_event
+
 app = FastAPI(title="Sysadmin AI Platform Hardened Auth Gateway", version="2.0.0")
+app.add_middleware(RequestLoggingMiddleware, service="auth_gateway")
+_LOG = get_logger("auth_gateway.server")
+
+
+async def _audit_async(**event_kwargs):
+    """Best-effort, non-blocking audit emission for async handlers.
+
+    Offloads the blocking VictoriaLogs/outbox write to a worker thread so a
+    flood of 401s or logins cannot stall the event loop. Any failure is logged
+    to stderr and never affects the request outcome.
+    """
+    try:
+        await asyncio.to_thread(log_audit_event, **event_kwargs)
+    except Exception as exc:
+        print(f"[!] Audit emission failed: {exc}", file=sys.stderr)
+
 
 @app.exception_handler(ConnectionError)
 async def shared_state_unavailable(_request: Request, _exc: ConnectionError):
@@ -194,6 +214,18 @@ async def verify(request: Request):
     try:
         user_id, auth_method = authenticate_request(request)
     except HTTPException:
+        reason = "invalid_credentials" if (
+            request.headers.get("authorization", "").strip()
+            or request.cookies.get("session_id", "").strip()
+        ) else "missing_credentials"
+        await _audit_async(
+            user_id="anonymous",
+            session_id="",
+            tool_name="auth_denied",
+            action="auth_denied",
+            exit_code=1,
+            extra={"reason": reason},
+        )
         return Response(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content=json.dumps({
@@ -349,7 +381,22 @@ async def login(request: Request):
             max_age=86400,
             secure=False
         )
+        await _audit_async(
+            user_id=username,
+            session_id=session_id,
+            tool_name="login_success",
+            action="login_success",
+            exit_code=0,
+        )
         return resp
+    await _audit_async(
+        user_id="anonymous",
+        session_id="",
+        tool_name="login_failure",
+        action="login_failure",
+        exit_code=1,
+        parameters={"attempted_user": username},
+    )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid sysadmin credentials")
 
 @app.post("/api/v1/auth/logout")
@@ -357,17 +404,31 @@ async def login(request: Request):
 @app.post("/logout")
 async def logout(request: Request):
     session_cookie = request.cookies.get("session_id", "").strip()
+    user_id = "anonymous"
     if session_cookie:
         r = get_valkey()
         if r:
             try:
+                resolved = r.get(f"session:{session_cookie}")
+                if resolved in VALID_USERS:
+                    user_id = resolved
                 r.delete(f"session:{session_cookie}")
             except Exception:
                 pass
+    await _audit_async(
+        user_id=user_id,
+        session_id="",
+        tool_name="logout",
+        action="logout",
+        exit_code=0,
+    )
     resp = JSONResponse({"status": "logged_out"})
     resp.delete_cookie("session_id")
     return resp
 
 if __name__ == "__main__":
+    configure("auth_gateway")
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3081
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    log_event(_LOG, "service_start", f"auth gateway listening on 127.0.0.1:{port}",
+              fields={"port": port, "host": "127.0.0.1"})
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", access_log=False)  # requests are logged as JSON by the middleware

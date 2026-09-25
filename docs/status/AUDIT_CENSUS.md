@@ -125,41 +125,109 @@ elevation; a failure is logged to stderr, not retried.
 | Trigger | `tool_name`/`action` | Fields |
 |---|---|---|
 | `QuotaLoggingHandler.async_log_success_event` | `litellm_completion` | resolved `user_id`, `session_id`, `prompt_tokens`/`completion_tokens`, `extra.response_id` |
+| `QuotaLoggingHandler.async_log_failure_event` | `litellm_completion_failure` | resolved `user_id`, `session_id`, `extra.error_type`, `extra.response_id`; `exit_code 1` |
 
-This event is also how token settlement becomes traceable to an identity.
+This event is also how token settlement becomes traceable to an identity. The
+failure handler mirrors the success path: an admitted completion that then
+fails still settles its daily-token reservation exactly once (normally with
+zero tokens) so a failed request cannot leak reserved capacity or double-settle.
 
 ### 3.8 Model manager (`model_manager/router.py`)
 
+The reviewer is the authenticated `sysadmin-admin`. Every rejected or failed
+lifecycle branch emits a best-effort event with `exit_code 1` and a
+`reason`/`error` in `extra`, so no mutation outcome goes unrecorded. Any
+lifecycle endpoint given an unknown model emits its own action with
+`reason: unknown_model`.
+
+| Trigger | `tool_name`/`action` | `exit_code` | Salient `extra` |
+|---|---|---|---|
+| Register a HuggingFace model | `model_register` | `0` | `parameters.name`, `hf_repo`, `revision` |
+| Registration rejected (invalid body/fields) | `model_register` | `1` | `reason: invalid_body` / `reason: validation`, `error` |
+| Registration rejected (model active) | `model_register` | `1` | `reason: active_operation` |
+| Update loading parameters | `model_update` | `0` | `parameters.name`, `fields` (validated loading parameters) |
+| Update rejected (invalid body) | `model_update` | `1` | `reason: invalid_body` |
+| Update rejected (unknown/immutable fields, no fields) | `model_update` | `1` | `reason: validation`, `error` |
+| Update rejected (parameter value invalid) | `model_update` | `1` | `reason: validation`, `error` |
+| Update rejected (model active) | `model_update` | `1` | `reason: active_operation` |
+| Start a download | `model_download` | `0` | `parameters.name` |
+| Download rejected (active operation) | `model_download` | `1` | `reason: active_operation` |
+| Downloader refused to start | `model_download` | `1` | `reason: start_failed`, `error` |
+| Start a vLLM/llama.cpp server | `model_start` | `0` | `parameters.name` |
+| Start rejected (already running) | `model_start` | `1` | `reason: already_running` |
+| Start rejected (not downloaded) | `model_start` | `1` | `reason: not_downloaded` |
+| Start rejected (active lifecycle operation) | `model_start` | `1` | `reason: active_operation` |
+| Start job thread could not spawn | `model_start` | `1` | `reason: spawn_failed` |
+| Start job failed asynchronously | `model_start` | `1` | `reason: start_failed`, `error`, `cleanup_not_confirmed` |
+| Stop a server | `model_stop` | `0` | `parameters.name` |
+| Stop rejected (still starting) | `model_stop` | `1` | `reason: starting` |
+| Stop failed (`server.stop`/sync raised) | `model_stop` | `1` | `reason: stop_failed`, `error` |
+| Restart rejected (still starting) | `model_restart` | `1` | `reason: starting` |
+| Restart stop failed | `model_restart` | `1` | `reason: stop_failed`, `error` |
+| Delete a model | `model_delete` | `0` | `parameters.name`, `delete_files` |
+| Delete rejected (active operation) | `model_delete` | `1` | `reason: active_operation` |
+| Delete rejected (still running) | `model_delete` | `1` | `reason: running` |
+| Delete rejected (path escape) | `model_delete` | `1` | `reason: path_escape` |
+
+Rejection/failure emission is best-effort: a failed audit write never changes
+the rejection outcome.
+
+### 3.9 Agent runtime turns (`agent_runtime/react_loop.py`)
+
+| Trigger | `tool_name`/`action` | `exit_code` | Salient `extra` |
+|---|---|---|---|
+| Turn completes (final answer, synthesized, or approval interception) | `agent_turn` | `0` | `model`; `approval_required: true` when the turn ended in a HITL request |
+| LLM gateway rejects or errors the turn | `agent_turn` | non-zero | `model`, `error`, `http_status` |
+
+Token counts are not known at this layer (they are settled downstream by the
+LiteLLM handler), so `prompt_tokens`/`completion_tokens` stay `0` here.
+Emission is best-effort and never changes the turn outcome.
+
+### 3.10 Quota denials (`auth_gateway/quota_manager.py`)
+
+| Denial | `tool_name`/`action` | `exit_code` | Salient `extra` |
+|---|---|---|---|
+| Concurrency ceiling (user or cluster) | `quota_denied` | non-zero | `limit_type: concurrency`, `stage`, `current`, `limit` |
+| RPM rolling window | `quota_denied` | non-zero | `limit_type: rpm`, `stage`, `current`, `limit` |
+| Daily budget pre-check (ForwardAuth `/verify`) | `quota_denied` | non-zero | `limit_type: daily_tokens`, `stage: forwardauth`, `current`, `limit` |
+| Daily reservation admission (LiteLLM `sysadmin_custom_auth`) | `quota_denied` | non-zero | `limit_type: daily_tokens`, `stage: litellm`, `current`, `limit` |
+
+`stage` records which admission gate surfaced the denial — `forwardauth` for the
+ForwardAuth daily-budget pre-check, `litellm` for LiteLLM admission
+(concurrency/RPM/daily reservation). Emission is best-effort: a failed audit
+write never converts a denial into an admission and never masks the fail-closed
+`ConnectionError` (503) path.
+
+### 3.11 Auth gateway (`auth_gateway/server.py`)
+
 | Trigger | `tool_name`/`action` | Fields |
 |---|---|---|
-| Register a HuggingFace model | `model_register` | `parameters.name`, `hf_repo`, `revision` |
-| Start a download | `model_download` | `parameters.name` |
-| Start a vLLM server | `model_start` | `parameters.name` |
-| Stop a vLLM server | `model_stop` | `parameters.name` |
-| Delete a model | `model_delete` | `parameters.name`, `delete_files` |
+| ForwardAuth `401` | `auth_denied` | `user_id: anonymous`, `extra.reason` (`missing_credentials` / `invalid_credentials`); never the presented token |
+| Login success | `login_success` | `user_id` (the authenticated user), `session_id` (the issued session) |
+| Login failure | `login_failure` | `user_id: anonymous`, `parameters.attempted_user` |
+| Logout | `logout` | `user_id` (resolved from the session, else `anonymous`) |
 
-The reviewer is the authenticated `sysadmin-admin`. These are admin-only paths;
-the download/start failure branches raise before the audit call, so they are not
-yet events (a follow-up consistent with the gaps below).
+The presented bearer token and password are never written to an event.
+Emission is offloaded to a worker thread (`asyncio.to_thread`) so a flood of
+`401`s cannot stall the event loop; a failure is logged to stderr and does not
+change the response.
 
-## 4. Open gaps (pinned by sentinel tests)
+### 3.12 Cancellation (`agent_runtime/router.py`)
 
-The following paths are **not** audited today. Each has a "gap sentinel" test
-that asserts the absence, so the census cannot drift silently. When a gap is
-closed, the sentinel fails: convert it to a positive assertion and update this
-section.
-
-| Gap | Path | Missing event |
+| Trigger | `tool_name`/`action` | Salient `extra` |
 |---|---|---|
-| G1 | ReAct runtime turns (`agent_runtime/react_loop.py`) | No runtime-level completion event; LLM-gateway rejections seen by the runtime are unaudited. Completions are only audited downstream by the LiteLLM handler (3.7). Cancellation is G6. |
-| G3 | LiteLLM failures (`QuotaLoggingHandler`) | `async_log_failure_event` is not implemented, so upstream errors and rejected streams emit no audit event. |
-| G4 | Quota denials (`auth_gateway/quota_manager.py`) | Concurrency/RPM/daily-budget rejections return `429`/`QuotaExceededException` without an audit event, at ForwardAuth and LiteLLM admission. |
-| G5 | Auth gateway (`auth_gateway/server.py`) | ForwardAuth `401`s, login success/failure and logout emit no audit event. |
-| G6 | Cancellation (`agent_runtime/cancellation.py`, `agent_runtime/router.py`) | `/agent/cancel`, SSE client disconnects and lease-loss cancellations only reach the server log. |
+| `POST /agent/cancel` | `agent_cancel` | `cause: user`, `request_id` |
+| SSE client disconnect | `agent_cancel` | `cause: disconnect`, `request_id` |
+| Quota lease ownership lost | `agent_cancel` | `cause: lease_lost`, `request_id` |
 
-These gaps are tracked as part of PR-B1 and are not production-acceptable for a
-final audit-completeness claim; see
-[`../plans/PRODUCTION_READINESS.md`](../plans/PRODUCTION_READINESS.md).
+Emission is best-effort and never alters the cancellation outcome.
+
+## 4. Open gaps
+
+No open gaps. Every enumerable user- or agent-triggerable path in §3 emits a
+schema-conformant event on both success and failure, and the sentinel tests
+that previously pinned G1/G3/G4/G5/G6 as unaudited have been replaced with
+positive assertions.
 
 ## 5. Maintaining the census
 
@@ -168,15 +236,14 @@ final audit-completeness claim; see
   scenario, so adding a tool without updating the census fails the suite.
 - Add a row to §3 and a positive test whenever a new
   `log_audit_event`/`AuditSink.emit` call site is introduced.
-- Do not delete a gap sentinel to make a change pass; close the gap first.
 - Keep the Python and JS writers in lockstep — a divergent field breaks the
   VictoriaLogs stream fields and the harness parity suite.
 
 ## 6. Honest status
 
-This census is complete for the paths it enumerates and incomplete by design
-for §4. It was derived by code inspection and is pinned by tests that run
-without live services; it is **not** evidence that a production VictoriaLogs
-instance received every event (query-completeness against a live store remains
-open — see [`TEST_READY.md`](TEST_READY.md)). No claim here is a substitute for
-the event-by-event live audit verification.
+This census is complete for the paths it enumerates. It was derived by code
+inspection and is pinned by tests that run without live services; it is **not**
+evidence that a production VictoriaLogs instance received every event
+(query-completeness against a live store remains open — see
+[`TEST_READY.md`](TEST_READY.md)). No claim here is a substitute for the
+event-by-event live audit verification.

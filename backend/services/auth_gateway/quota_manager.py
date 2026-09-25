@@ -9,6 +9,7 @@ Enforces:
 - Emergency P1 priority admission (60-minute TTL)
 """
 import os
+import sys
 import time
 import datetime
 import json
@@ -18,6 +19,8 @@ import threading
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, Dict, Any
 import redis
+
+from backend.services.agent_tools.audit import log_audit_event
 
 logger = logging.getLogger("auth_gateway.quota_manager")
 
@@ -145,6 +148,33 @@ class QuotaExceededException(Exception):
         self.message = message
         self.current = current
         self.limit = limit
+
+
+def _audit_quota_denial(user_id: str, limit_type: str, current: Any, limit: Any, stage: str) -> None:
+    """Best-effort audit of a quota denial; never alters the denial outcome.
+
+    A failed audit write must not convert a rejection into an admission and
+    must not mask the fail-closed ``ConnectionError`` the caller is about to
+    surface. ``stage`` records which admission gate surfaced the denial:
+    ``forwardauth`` (the ForwardAuth daily-budget pre-check) or ``litellm``
+    (LiteLLM admission: concurrency/RPM/daily reservation).
+    """
+    try:
+        log_audit_event(
+            user_id=user_id,
+            session_id="",
+            tool_name="quota_denied",
+            action="quota_denied",
+            exit_code=1,
+            extra={
+                "limit_type": limit_type,
+                "stage": stage,
+                "current": current,
+                "limit": limit,
+            },
+        )
+    except Exception as exc:
+        print(f"[!] Audit emission failed for quota denial: {exc}", file=sys.stderr)
 
 class QuotaManager:
     RESERVATION_TTL_SECONDS = 8 * 24 * 60 * 60
@@ -342,9 +372,11 @@ class QuotaManager:
                     self._remove_local_lease(stale_id)
             current = self._local_inflight.get(user_id, 0) if hasattr(self, "_local_inflight") else 0
             if current >= limit:
+                _audit_quota_denial(user_id, "concurrency", current, limit, "litellm")
                 raise QuotaExceededException("concurrency", f"Concurrency ceiling exceeded ({current}/{limit} in-flight calls active).", current, limit)
             cluster_count = getattr(self, "_local_cluster_total", 0)
             if self.enforce_cluster_limits and cluster_count >= cluster_limit:
+                _audit_quota_denial(user_id, "concurrency", cluster_count, cluster_limit, "litellm")
                 raise QuotaExceededException("concurrency", f"Cluster concurrency ceiling exceeded ({cluster_count}/{cluster_limit} slots active).", cluster_count, cluster_limit)
             if not hasattr(self, "_local_inflight"):
                 self._local_inflight = {}
@@ -382,9 +414,11 @@ class QuotaManager:
                 admitted, current, reason = int(result[0]), int(result[1]), str(result[2])
                 if not admitted:
                     if reason == "cluster_limit":
+                        _audit_quota_denial(user_id, "concurrency", current, cluster_limit, "litellm")
                         raise QuotaExceededException(
                             "concurrency", f"Cluster concurrency ceiling exceeded ({current}/{cluster_limit} slots active).", current, cluster_limit
                         )
+                    _audit_quota_denial(user_id, "concurrency", current, limit, "litellm")
                     raise QuotaExceededException(
                         "concurrency", f"Concurrency ceiling exceeded ({current}/{limit} in-flight calls active).", current, limit
                     )
@@ -512,6 +546,7 @@ class QuotaManager:
             _, count_before, _, _ = pipe.execute()
 
             if count_before >= limit:
+                _audit_quota_denial(user_id, "rpm", count_before, limit, "litellm")
                 raise QuotaExceededException(
                     limit_type="rpm",
                     message=f"Rate limit exceeded ({count_before}/{limit} requests in rolling 60s window).",
@@ -540,6 +575,7 @@ class QuotaManager:
         try:
             current_consumed = int(r.get(daily_key) or 0)
             if (current_consumed + estimated_tokens) >= limit:
+                _audit_quota_denial(user_id, "daily_tokens", current_consumed, limit, "forwardauth")
                 raise QuotaExceededException(
                     limit_type="daily_tokens",
                     message=f"Daily token budget exhausted ({current_consumed:,}/{limit:,} tokens consumed). Rollover at 00:00:00.",
@@ -595,6 +631,7 @@ class QuotaManager:
                 if identity in reservations or identity in getattr(self, "_local_daily_settled", set()):
                     raise ValueError("Duplicate daily token reservation ID")
                 if actual + already_reserved + estimated_tokens > limit:
+                    _audit_quota_denial(user_id, "daily_tokens", actual + already_reserved, limit, "litellm")
                     raise QuotaExceededException("daily_tokens", f"Daily token budget exhausted ({actual + already_reserved:,}/{limit:,} tokens reserved or consumed).", actual + already_reserved, limit)
                 reservations[identity] = (estimated_tokens, expires_at)
                 self._local_daily_reservations = reservations
@@ -608,6 +645,7 @@ class QuotaManager:
             if not admitted:
                 if reason == "duplicate":
                     raise ValueError("Duplicate daily token reservation ID")
+                _audit_quota_denial(user_id, "daily_tokens", current, limit, "litellm")
                 raise QuotaExceededException(
                     "daily_tokens",
                     f"Daily token budget exhausted ({current:,}/{limit:,} tokens reserved or consumed).",

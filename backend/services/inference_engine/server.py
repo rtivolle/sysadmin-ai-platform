@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import json
+import logging
 import asyncio
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, Request, HTTPException
@@ -16,11 +17,15 @@ from starlette.background import BackgroundTask
 import httpx
 import uvicorn
 
+from services.logging_setup import RequestLoggingMiddleware, configure, get_logger, log_event
+
 BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
 app = FastAPI(title="Sysadmin AI Platform Inference Engine", version="1.0.0")
+app.add_middleware(RequestLoggingMiddleware, service="inference")
+_LOG = get_logger("inference_engine.server")
 
 UPSTREAM_VLLM_URL = os.getenv("UPSTREAM_VLLM_URL", "")
 
@@ -203,6 +208,7 @@ async def chat_completions(request: Request):
     )
     if upstream_base:
         # Keep both response and client alive until the downstream stream closes.
+        started = time.monotonic()
         client = httpx.AsyncClient(timeout=120.0)
         headers = {k: v for k, v in request.headers.items()
                    if k.lower() not in ["host", "content-length"]}
@@ -212,6 +218,10 @@ async def chat_completions(request: Request):
             upstream_resp = await client.send(upstream_req, stream=True)
         except Exception as exc:
             await client.aclose()
+            log_event(_LOG, "completion", "upstream connect failed",
+                      fields={"model": model, "stream": stream, "error_type": type(exc).__name__,
+                              "duration_ms": round((time.monotonic() - started) * 1000, 2)},
+                      level=logging.WARNING)
             raise HTTPException(status_code=502, detail=f"Error connecting to vLLM backend: {exc}") from exc
 
         async def close_upstream():
@@ -224,9 +234,16 @@ async def chat_completions(request: Request):
 
         if stream and upstream_resp.is_success:
             async def relay():
+                relayed = 0
                 try:
                     async for chunk in upstream_resp.aiter_bytes():
+                        relayed += len(chunk)
                         yield chunk
+                    log_event(_LOG, "completion", "streamed completion relayed",
+                              fields={"model": model, "stream": True,
+                                      "upstream_status": upstream_resp.status_code,
+                                      "bytes": relayed,
+                                      "duration_ms": round((time.monotonic() - started) * 1000, 2)})
                 finally:
                     await close_upstream()
             return StreamingResponse(relay(), status_code=upstream_resp.status_code,
@@ -234,6 +251,21 @@ async def chat_completions(request: Request):
                                      background=BackgroundTask(close_upstream))
         try:
             await upstream_resp.aread()
+            fields = {"model": model, "stream": stream,
+                      "upstream_status": upstream_resp.status_code,
+                      "duration_ms": round((time.monotonic() - started) * 1000, 2)}
+            if upstream_resp.status_code == 200:
+                try:
+                    usage = upstream_resp.json().get("usage") or {}
+                    for key in ("prompt_tokens", "completion_tokens"):
+                        value = usage.get(key)
+                        if value is not None:
+                            fields[key] = value
+                except Exception:
+                    pass  # non-JSON upstream body: counts stay absent, never guessed
+            else:
+                fields["error"] = True
+            log_event(_LOG, "completion", "completion served", fields=fields)
             # Preserve upstream validation errors instead of disguising them as SSE 200.
             return Response(upstream_resp.content, status_code=upstream_resp.status_code,
                             media_type=upstream_resp.headers.get("content-type", "application/json"))
@@ -241,11 +273,14 @@ async def chat_completions(request: Request):
             await close_upstream()
 
     # 2. Local Simulated Inference (Zero GPU overhead for dev/test)
+    simulated_started = time.monotonic()
     req_id = f"chatcmpl-{int(time.time()*1000)}"
     reply_text = simulate_chat_completion(messages, model)
 
     prompt_tokens = sum(len(m.get("content", "").split()) for m in messages) + 10
     completion_tokens = len(reply_text.split()) + 5
+    simulated_fields = {"model": model, "stream": stream, "simulated": True,
+                        "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
 
     if stream:
         async def event_generator():
@@ -282,9 +317,15 @@ async def chat_completions(request: Request):
             }
             yield f"data: {json.dumps(end_chunk)}\n\n"
             yield "data: [DONE]\n\n"
+            log_event(_LOG, "completion", "simulated completion streamed",
+                      fields={**simulated_fields,
+                              "duration_ms": round((time.monotonic() - simulated_started) * 1000, 2)})
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+    log_event(_LOG, "completion", "simulated completion served",
+              fields={**simulated_fields,
+                      "duration_ms": round((time.monotonic() - simulated_started) * 1000, 2)})
     return {
         "id": req_id,
         "object": "chat.completion",
@@ -308,5 +349,9 @@ async def chat_completions(request: Request):
     }
 
 if __name__ == "__main__":
+    configure("inference")
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    log_event(_LOG, "service_start", f"inference engine listening on 127.0.0.1:{port}",
+              fields={"port": port, "host": "127.0.0.1",
+                      "upstream_vllm": bool(UPSTREAM_VLLM_URL)})
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", access_log=False)  # requests are logged as JSON by the middleware

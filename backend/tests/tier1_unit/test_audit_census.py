@@ -14,16 +14,18 @@ Paths documented as still-unaudited gaps carry "gap sentinel" tests that
 assert NO event is emitted today. If a sentinel fails, the gap was closed:
 convert the sentinel into a positive assertion and update AUDIT_CENSUS.md.
 """
-import inspect
 import json
 import re
 import subprocess
 import uuid
+import asyncio
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 import backend.services.agent_tools.audit as audit_backend
 import services.agent_tools.audit as audit_services
@@ -51,7 +53,6 @@ TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 VENV_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python3"
-LITELLM_AUTH_PATH = REPO_ROOT / "backend" / "services" / "auth_gateway" / "litellm_auth.py"
 
 
 def assert_event_schema(event):
@@ -754,71 +755,357 @@ asyncio.run(handler.async_log_success_event(kwargs, resp, None, None))
 
 
 # ---------------------------------------------------------------------------
-# 7. Gap sentinels: documented unaudited paths (docs/status/AUDIT_CENSUS.md)
-# These assert the CURRENT absence of audit emission so the census cannot
-# drift silently. If one fails, the gap was fixed: replace the sentinel with
-# a positive assertion and update AUDIT_CENSUS.md.
+# 7. Former gap sentinels — now positive assertions.
+# G1/G3/G4/G5/G6 were closed (see docs/status/AUDIT_CENSUS.md §3). Each former
+# "absence" test is replaced by a positive success/failure assertion below.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_gap_g1_react_loop_emits_no_completion_audit(monkeypatch):
-    """GAP G1: runtime chat turns emit no runtime-level audit event today.
 
-    react_loop imports log_audit_event but never calls it; completions are
-    only audited downstream by the LiteLLM gateway handler. Cancellation and
-    gateway rejections seen by the runtime are likewise unaudited.
-    """
-    calls = []
-    monkeypatch.setattr(react_loop, "log_audit_event", lambda *a, **k: calls.append((a, k)))
+# --- G1: runtime agent_turn -------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_g1_agent_turn_success_is_audited(monkeypatch, audit_spool):
+    """GAP G1 (closed): a completed ReAct turn emits an agent_turn event."""
+    audit_spool.install(react_loop)
 
     async def fake_llm(messages, model, user_id, session_id=None):
         return "Thought: I have enough.\nFinal Answer: nothing to do."
 
     monkeypatch.setattr(react_loop, "call_llm", fake_llm)
     store = SessionStore()
-    session = await store.create_or_get_session(user_id="sysadmin-01", session_id="sess-gap-g1")
+    session = await store.create_or_get_session(user_id="sysadmin-01", session_id="sess-g1-ok")
     resp = await react_loop.run_react_agent(
-        AgentChatRequest(prompt="status?"), "sysadmin-01", session, store,
+        AgentChatRequest(prompt="status?", model="fast-model"), "sysadmin-01", session, store,
     )
     assert "nothing to do" in resp.response
-    assert calls == [], "GAP G1 closed: runtime now audits completions — update AUDIT_CENSUS.md"
+
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "agent_turn"
+    assert event["action"] == "agent_turn"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["session_id"] == "sess-g1-ok"
+    assert event["exit_code"] == 0
+    assert event["extra"]["model"] == "fast-model"
 
 
-def test_gap_g3_litellm_failure_event_not_audited():
-    """GAP G3: QuotaLoggingHandler audits successes only; LLM call failures
-    at the gateway (upstream errors, rejected streams) emit no audit event.
-    Source-scanned because importing litellm under pytest segfaults here."""
-    source = LITELLM_AUTH_PATH.read_text(encoding="utf-8")
-    assert "async_log_failure_event" not in source, (
-        "GAP G3 closed: failure logging implemented — add a positive test and update AUDIT_CENSUS.md"
-    )
+@pytest.mark.asyncio
+async def test_g1_agent_turn_failure_is_audited(monkeypatch, audit_spool):
+    """GAP G1 (closed): a gateway rejection emits a non-zero agent_turn."""
+    audit_spool.install(react_loop)
 
+    async def failing_llm(messages, model, user_id, session_id=None):
+        req = httpx.Request("POST", "http://litellm/v1/chat/completions")
+        resp = httpx.Response(429, request=req)
+        raise httpx.HTTPStatusError("rejected", request=req, response=resp)
 
-def test_gap_g4_quota_denials_not_audited():
-    """GAP G4: quota denials (concurrency 429, RPM, daily budget at ForwardAuth
-    and LiteLLM admission) raise without emitting any audit event."""
-    assert "log_audit_event" not in inspect.getsource(quota_module), (
-        "GAP G4 closed: quota paths now audit — add positive tests and update AUDIT_CENSUS.md"
-    )
-
-
-def test_gap_g5_auth_events_not_audited():
-    """GAP G5: ForwardAuth 401s, login success/failure and logout emit no
-    audit event from the auth gateway."""
-    assert all("log_audit_event" not in inspect.getsource(handler)
-               for handler in (auth_server.verify, auth_server.login, auth_server.logout)), (
-        "GAP G5 closed: auth gateway now audits — add positive tests and update AUDIT_CENSUS.md"
-    )
-
-
-def test_gap_g6_cancellation_not_audited():
-    """GAP G6: /agent/cancel, SSE client disconnects and lease-loss
-    cancellations only hit the server log, never the audit store."""
-    from backend.services.agent_runtime import cancellation as cancellation_module
-    import importlib
-    agent_router_module = importlib.import_module("backend.services.agent_runtime.router")
-
-    for module in (cancellation_module, agent_router_module):
-        assert "log_audit_event" not in inspect.getsource(module), (
-            f"GAP G6 closed in {module.__name__}: cancellation now audits — update AUDIT_CENSUS.md"
+    monkeypatch.setattr(react_loop, "call_llm", failing_llm)
+    store = SessionStore()
+    session = await store.create_or_get_session(user_id="sysadmin-01", session_id="sess-g1-fail")
+    with pytest.raises(HTTPException) as exc:
+        await react_loop.run_react_agent(
+            AgentChatRequest(prompt="status?", model="fast-model"), "sysadmin-01", session, store,
         )
+    assert exc.value.status_code == 429
+
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "agent_turn"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["exit_code"] != 0
+    assert event["extra"]["http_status"] == 429
+    assert event["extra"]["error"]
+    assert event["extra"]["model"] == "fast-model"
+
+
+# --- G3: LiteLLM failure event ----------------------------------------------
+
+def test_litellm_completion_failure_is_audited(tmp_path):
+    """GAP G3 (closed): the failure handler audits rejected/errored completions.
+
+    Runs in a subprocess because importing litellm under pytest segfaults on
+    this host; mirrors the success-path convention above.
+    """
+    outbox = tmp_path / "litellm-failure-outbox.jsonl"
+    settle_log = tmp_path / "settle-calls.jsonl"
+    script = f"""
+import asyncio, json
+from types import SimpleNamespace
+import backend.services.agent_tools.audit as audit
+audit._post_event = lambda event: False
+audit.OUTBOX_PATH = {str(outbox)!r}
+from backend.services.auth_gateway import litellm_auth
+
+def record_settle(*args):
+    with open({str(settle_log)!r}, "a") as f:
+        f.write(json.dumps(list(args)) + "\\n")
+    return 0
+
+litellm_auth.quota_mgr = SimpleNamespace(
+    record_token_consumption=lambda *args: None,
+    settle_daily_token_reservation=record_settle,
+)
+handler = litellm_auth.QuotaLoggingHandler()
+kwargs = {{"user": "sysadmin-01", "litellm_params": {{"metadata": {{"session_id": "sess-llm-fail", "quota_reservation_id": "res-fail", "quota_admission_day": "2026-09-24"}}}}}}
+resp = SimpleNamespace(status_code=429, id="resp-fail")
+asyncio.run(handler.async_log_failure_event(kwargs, resp, None, None))
+"""
+    proc = subprocess.run(
+        [str(VENV_PYTHON), "-c", script],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180,
+    )
+    assert proc.returncode == 0, f"subprocess failed:\n{proc.stderr[-2000:]}"
+
+    (event,) = [json.loads(line) for line in outbox.read_text().splitlines() if line.strip()]
+    assert_event_schema(event)
+    assert event["tool_name"] == "litellm_completion_failure"
+    assert event["action"] == "litellm_completion_failure"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["session_id"] == "sess-llm-fail"
+    assert event["exit_code"] != 0
+    assert event["extra"]["error_type"] == "http_429"
+    assert event["extra"]["response_id"] == "resp-fail"
+
+    settle_calls = [json.loads(line) for line in settle_log.read_text().splitlines() if line.strip()]
+    assert len(settle_calls) == 1, "failure path must settle the reservation exactly once (no leaked slot)"
+    assert settle_calls[0][:3] == ["sysadmin-01", "res-fail", "2026-09-24"]
+    assert settle_calls[0][3] == 0 and settle_calls[0][4] == 0
+
+
+# --- G4: quota denials ------------------------------------------------------
+
+def test_g4_quota_denial_litellm_is_audited(monkeypatch, audit_spool):
+    """GAP G4 (closed): concurrency + daily-reservation denials audit quota_denied."""
+    audit_spool.install(quota_module)
+    monkeypatch.delenv("VALKEY_URL", raising=False)
+    manager = quota_module.QuotaManager()
+    monkeypatch.setattr(manager, "is_p1_elevated", lambda user: False)
+    user = f"quota-deny-{uuid.uuid4().hex[:8]}"
+
+    # Concurrency ceiling (2 for standard).
+    manager.acquire_concurrency_slot(user)
+    manager.acquire_concurrency_slot(user)
+    with pytest.raises(quota_module.QuotaExceededException):
+        manager.acquire_concurrency_slot(user)
+
+    # Daily reservation exhaustion.
+    manager.reserve_daily_token_budget(user, "res-full", 2_000_000)
+    with pytest.raises(quota_module.QuotaExceededException):
+        manager.reserve_daily_token_budget(user, "res-over", 1)
+
+    events = audit_spool.events()
+    assert len(events) == 2
+    concurrency_event, daily_event = events
+    for event in events:
+        assert_event_schema(event)
+        assert event["tool_name"] == "quota_denied"
+        assert event["action"] == "quota_denied"
+        assert event["user_id"] == user
+        assert event["exit_code"] != 0
+    assert concurrency_event["extra"]["limit_type"] == "concurrency"
+    assert concurrency_event["extra"]["stage"] == "litellm"
+    assert daily_event["extra"]["limit_type"] == "daily_tokens"
+    assert daily_event["extra"]["stage"] == "litellm"
+
+
+def test_g4_quota_denial_forwardauth_is_audited(monkeypatch, audit_spool):
+    """GAP G4 (closed): the ForwardAuth daily-budget denial audits quota_denied."""
+    audit_spool.install(quota_module)
+
+    class _DailyStore:
+        def __init__(self, consumed):
+            self.consumed = str(consumed)
+
+        def get(self, key):
+            if key.startswith("daily_tokens:"):
+                return self.consumed
+            return None
+
+    manager = quota_module.QuotaManager(redis_client=_DailyStore(2_000_000))
+    monkeypatch.setattr(manager, "is_p1_elevated", lambda user: False)
+    with pytest.raises(quota_module.QuotaExceededException):
+        manager.check_daily_token_budget("sysadmin-01")
+
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "quota_denied"
+    assert event["extra"]["limit_type"] == "daily_tokens"
+    assert event["extra"]["stage"] == "forwardauth"
+    assert event["exit_code"] != 0
+
+
+# --- G5: auth gateway -------------------------------------------------------
+
+class _FakeSessionStore:
+    def __init__(self):
+        self.sessions = {}
+
+    def setex(self, key, ttl, value):
+        self.sessions[key] = value
+
+    def get(self, key):
+        return self.sessions.get(key)
+
+    def delete(self, key):
+        self.sessions.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_g5_forwardauth_401_emits_auth_denied(monkeypatch, audit_spool):
+    audit_spool.install(auth_server)
+    monkeypatch.setattr(auth_server, "load_valid_tokens", lambda: {"known-token": "sysadmin-01"})
+    transport = httpx.ASGITransport(app=auth_server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/verify", headers={"Authorization": "Bearer forged-token"})
+    assert resp.status_code == 401
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "auth_denied"
+    assert event["action"] == "auth_denied"
+    assert event["user_id"] == "anonymous"
+    assert event["exit_code"] != 0
+    assert event["extra"]["reason"] == "invalid_credentials"
+    assert "forged-token" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_g5_login_success_emits_login_success(monkeypatch, audit_spool):
+    audit_spool.install(auth_server)
+    store = _FakeSessionStore()
+    monkeypatch.setattr(auth_server, "valid_login_password", lambda u, p: True)
+    monkeypatch.setattr(auth_server, "get_valkey", lambda: store)
+    transport = httpx.ASGITransport(app=auth_server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/login", json={"username": "sysadmin-01", "password": "hunter2"})
+    assert resp.status_code == 200
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "login_success"
+    assert event["action"] == "login_success"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["exit_code"] == 0
+    assert "hunter2" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_g5_login_failure_emits_login_failure(monkeypatch, audit_spool):
+    audit_spool.install(auth_server)
+    monkeypatch.setattr(auth_server, "valid_login_password", lambda u, p: False)
+    transport = httpx.ASGITransport(app=auth_server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/login", json={"username": "sysadmin-01", "password": "wrong-password-xyz"})
+    assert resp.status_code == 401
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "login_failure"
+    assert event["action"] == "login_failure"
+    assert event["user_id"] == "anonymous"
+    assert event["exit_code"] != 0
+    assert event["parameters"]["attempted_user"] == "sysadmin-01"
+    assert "wrong-password-xyz" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_g5_logout_emits_logout(monkeypatch, audit_spool):
+    audit_spool.install(auth_server)
+    store = _FakeSessionStore()
+    store.sessions["session:tok-123"] = "sysadmin-01"
+    monkeypatch.setattr(auth_server, "get_valkey", lambda: store)
+    transport = httpx.ASGITransport(app=auth_server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/logout", cookies={"session_id": "tok-123"})
+    assert resp.status_code == 200
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "logout"
+    assert event["action"] == "logout"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_g5_events_never_contain_token_or_password(monkeypatch, audit_spool):
+    audit_spool.install(auth_server)
+    monkeypatch.setattr(auth_server, "load_valid_tokens", lambda: {"known-token": "sysadmin-01"})
+    monkeypatch.setattr(auth_server, "valid_login_password", lambda u, p: False)
+    leak_token = "BEARER-LEAK-TOKEN-abc123"
+    leak_password = "SUPER-SECRET-PASSWORD-xyz789"
+    transport = httpx.ASGITransport(app=auth_server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.get("/verify", headers={"Authorization": f"Bearer {leak_token}"})
+        await client.post("/login", json={"username": "sysadmin-01", "password": leak_password})
+
+    events = audit_spool.events()
+    assert len(events) == 2
+    for event in events:
+        serialized = json.dumps(event)
+        assert leak_token not in serialized
+        assert leak_password not in serialized
+
+
+# --- G6: cancellation -------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_g6_cancel_endpoint_emits_user_cause(monkeypatch, audit_spool):
+    services_router = importlib.import_module("services.agent_runtime.router")
+    audit_spool.install(services_router)
+    monkeypatch.setattr(services_router, "authenticate_request", lambda request: ("sysadmin-01", "bearer"))
+    await services_router.registry.register("req-1", "sysadmin-01", session_id="sess-1")
+    try:
+        transport = httpx.ASGITransport(app=agent_server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post("/agent/cancel", json={"request_id": "req-1"})
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+    finally:
+        await services_router.registry.unregister("req-1")
+
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "agent_cancel"
+    assert event["action"] == "agent_cancel"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["extra"]["cause"] == "user"
+    assert event["extra"]["request_id"] == "req-1"
+
+
+@pytest.mark.asyncio
+async def test_g6_sse_disconnect_emits_disconnect_cause(monkeypatch, audit_spool):
+    services_router = importlib.import_module("services.agent_runtime.router")
+    audit_spool.install(services_router)
+
+    class _DisconnectedRequest:
+        async def is_disconnected(self):
+            return True
+
+    record = SimpleNamespace(cancel_event=asyncio.Event())
+    stopped = await services_router._audit_disconnect_if_needed(
+        record, _DisconnectedRequest(), "sysadmin-01", "sess-1", "req-1",
+    )
+    assert stopped is True
+
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "agent_cancel"
+    assert event["extra"]["cause"] == "disconnect"
+    assert event["extra"]["request_id"] == "req-1"
+
+
+@pytest.mark.asyncio
+async def test_g6_lease_loss_emits_lease_lost_cause(monkeypatch, audit_spool):
+    services_router = importlib.import_module("services.agent_runtime.router")
+    audit_spool.install(services_router)
+    monkeypatch.setattr(services_router.quota_mgr, "renew_concurrency_slot", lambda lease_id, timeout: False)
+
+    await services_router._maintain_quota_lease(
+        "lease:sysadmin-01:abc", asyncio.Event(), SimpleNamespace(cancel=lambda: None),
+        user_id="sysadmin-01", session_id="sess-1", request_id="req-1",
+        renew_interval=0.01,
+    )
+
+    (event,) = audit_spool.events()
+    assert_event_schema(event)
+    assert event["tool_name"] == "agent_cancel"
+    assert event["user_id"] == "sysadmin-01"
+    assert event["extra"]["cause"] == "lease_lost"
+    assert event["extra"]["request_id"] == "req-1"

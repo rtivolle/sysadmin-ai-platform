@@ -6,13 +6,19 @@ NODE  := node
 .DEFAULT_GOAL := help
 .PHONY: help install start stop restart status logs chat test test-unit test-sandbox \
         test-concurrency test-recovery test-live benchmark harness-test harness-verify \
-        stress-sandbox compile clean-cache
+        stress-sandbox compile clean-cache update update-check
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install dependencies, binaries and random credentials
 	./install.sh
+
+update: ## Update platform modules (fast-forward + deps + restart running services)
+	./update.sh
+
+update-check: ## Report whether platform module updates are available (exit 1 if so)
+	./update.sh --check
 
 start: ## Start all backend services
 	./platform.sh start

@@ -1,0 +1,35 @@
+#!/usr/sbin/nft -f
+# Firewall ruleset for the INFERENCE (GPU) host — multi-host split (PR-H1).
+#
+# NOT applied by the installer. Review the peer addresses and interface name,
+# then load explicitly:
+#     nft -f backend/config/firewall/inference.nft
+#
+# Policy: default-deny. Only W may reach LiteLLM (:4000); LiteLLM's in-process
+# auth reaches Valkey/VictoriaLogs on D. inference_engine/vLLM stay loopback.
+
+define LAN_IFACE         = "eth0"
+define PEER_WEB_IP       = 10.0.0.10   # W — the only host allowed to call LiteLLM
+define PEER_DATA_IP      = 10.0.0.12   # D — Valkey :6379, VictoriaLogs :9428
+
+table inet sysadmin {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    ct state established,related accept
+    iif lo accept
+
+    # Only W may call LiteLLM. inference_engine (:8000) and vLLM stay loopback.
+    ip saddr $PEER_WEB_IP tcp dport 4000 accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    ct state established,related accept
+    oif lo accept
+
+    # LiteLLM's in-process custom_auth / quota / audit needs D.
+    ip daddr $PEER_DATA_IP tcp dport { 6379, 9428 } accept
+  }
+}

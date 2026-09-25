@@ -10,6 +10,9 @@ import uuid
 from .filter import evaluate_command_safety, normalize_command
 from .models import ApprovalRecord
 from .store import ValkeyApprovalStore, get_approval_store
+from services.logging_setup import get_logger, log_event
+
+_GATE_LOG = get_logger("approval_gate")
 
 
 class ApprovalGate:
@@ -40,6 +43,9 @@ class ApprovalGate:
         if command:
             safety = self.evaluate_safety(command)
             if safety["action"] == "BLOCKED":
+                log_event(_GATE_LOG, "approval_blocked", "approval proposal blocked",
+                          fields={"user_id": user_id, "target": target, "action": action,
+                                  "reason": safety["reason"]})
                 return {
                     "success": False,
                     "blocked": True,
@@ -78,6 +84,11 @@ class ApprovalGate:
         )
 
         self.store.create_approval(record)
+        log_event(_GATE_LOG, "approval_proposed", "approval proposed",
+                  fields={"approval_id": approval_id, "user_id": user_id, "target": target,
+                          "action": action, "session_id": session_id,
+                          "command_len": len(command), "content_hash": content_hash[:16],
+                          "base_hash": base_hash[:16] if base_hash else None})
         return {
             "success": True,
             "approval_id": approval_id,
@@ -100,13 +111,17 @@ class ApprovalGate:
         reviewer_role: str,
         reason: str = ""
     ) -> Dict[str, Any]:
-        return self.store.decide_approval(
+        result = self.store.decide_approval(
             approval_id=approval_id,
             approved=approved,
             reviewer=reviewer,
             reviewer_role=reviewer_role,
             reason=reason,
         )
+        log_event(_GATE_LOG, "approval_decided", "approval decision recorded",
+                  fields={"approval_id": approval_id, "approved": approved, "reviewer": reviewer,
+                          "reviewer_role": reviewer_role, "outcome": (result or {}).get("status")})
+        return result
 
     def claim_execution(
         self,
@@ -118,7 +133,7 @@ class ApprovalGate:
         target: str = "",
         content_hash: str = ""
     ) -> Dict[str, Any]:
-        return self.store.claim_for_execution(
+        result = self.store.claim_for_execution(
             approval_id=approval_id,
             user_id=user_id,
             session_id=session_id,
@@ -127,6 +142,10 @@ class ApprovalGate:
             target=target,
             content_hash=content_hash,
         )
+        log_event(_GATE_LOG, "approval_claimed", "approval claimed for execution",
+                  fields={"approval_id": approval_id, "user_id": user_id,
+                          "status": (result or {}).get("status", "denied")})
+        return result
 
     def complete_execution(
         self,
@@ -135,12 +154,15 @@ class ApprovalGate:
         exit_code: int = 0,
         result_summary: str = ""
     ) -> Dict[str, Any]:
-        return self.store.complete_execution(
+        result = self.store.complete_execution(
             approval_id=approval_id,
             is_success=is_success,
             exit_code=exit_code,
             result_summary=result_summary,
         )
+        log_event(_GATE_LOG, "approval_completed", "approval execution completed",
+                  fields={"approval_id": approval_id, "is_success": is_success, "exit_code": exit_code})
+        return result
 
     def get_status(self, approval_id: str) -> Optional[Dict[str, Any]]:
         return self.store.get_approval(approval_id)

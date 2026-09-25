@@ -132,15 +132,34 @@ async def sysadmin_custom_auth(request: Request, api_key: str) -> UserAPIKeyAuth
 
 class QuotaLoggingHandler(CustomLogger):
     """Logs token usage to Valkey daily ledger upon request completion."""
+
+    @staticmethod
+    def _resolve_user_id(kwargs, response_obj):
+        user_id = kwargs.get("user") or kwargs.get("litellm_params", {}).get("metadata", {}).get("user_id")
+        if not user_id and "user_api_key_dict" in kwargs:
+            user_id = getattr(kwargs["user_api_key_dict"], "user_id", None)
+        if not user_id and hasattr(response_obj, "user"):
+            user_id = response_obj.user
+        return user_id
+
+    @staticmethod
+    def _classify_failure(response_obj):
+        """Map a LiteLLM failure object to a stable, non-sensitive error_type string."""
+        try:
+            status_code = getattr(response_obj, "status_code", None)
+            if status_code is not None:
+                return f"http_{status_code}"
+        except Exception:
+            pass
+        cls = getattr(response_obj, "__class__", None)
+        if cls is not None:
+            return getattr(cls, "__name__", "unknown_error")
+        return "unknown_error"
+
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
         try:
-            user_id = kwargs.get("user") or kwargs.get("litellm_params", {}).get("metadata", {}).get("user_id")
-            if not user_id and "user_api_key_dict" in kwargs:
-                user_id = getattr(kwargs["user_api_key_dict"], "user_id", None)
+            user_id = self._resolve_user_id(kwargs, response_obj)
             
-            if not user_id and hasattr(response_obj, "user"):
-                user_id = response_obj.user
-
             if user_id and hasattr(response_obj, "usage") and response_obj.usage:
                 prompt_tokens = getattr(response_obj.usage, "prompt_tokens", 0) or 0
                 completion_tokens = getattr(response_obj.usage, "completion_tokens", 0) or 0
@@ -172,6 +191,54 @@ class QuotaLoggingHandler(CustomLogger):
                     logger.error("Token usage audit could not be persisted: %s", audit_result.get("error"))
         except Exception as e:
             logger.warning(f"Failed to record token consumption: {e}")
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        """Audit a failed/rejected completion and settle its reservation once.
+
+        Mirrors the success path: an admitted completion that then fails still
+        holds a daily-token reservation, so that reservation is settled (with
+        whatever tokens actually surfaced, normally zero) exactly once rather
+        than leaking capacity. The concurrency slot is owned by the agent
+        runtime and is reclaimed there; this handler never touches it.
+        """
+        try:
+            user_id = self._resolve_user_id(kwargs, response_obj)
+            metadata = kwargs.get("litellm_params", {}).get("metadata") or {}
+            reservation_id = metadata.get("quota_reservation_id")
+            admission_day = metadata.get("quota_admission_day")
+
+            if user_id:
+                # Settle any outstanding reservation so a failed request does
+                # not leak its reserved daily capacity. settle_* is exactly-once.
+                if reservation_id and admission_day:
+                    usage = getattr(response_obj, "usage", None)
+                    prompt_tokens = (getattr(usage, "prompt_tokens", 0) or 0) if usage else 0
+                    completion_tokens = (getattr(usage, "completion_tokens", 0) or 0) if usage else 0
+                    quota_mgr.settle_daily_token_reservation(
+                        user_id,
+                        reservation_id,
+                        admission_day,
+                        prompt_tokens,
+                        completion_tokens,
+                    )
+
+                error_type = self._classify_failure(response_obj)
+                audit_result = await asyncio.to_thread(
+                    log_audit_event,
+                    user_id=user_id,
+                    session_id=str(metadata.get("session_id") or ""),
+                    tool_name="litellm_completion_failure",
+                    action="litellm_completion_failure",
+                    exit_code=1,
+                    extra={
+                        "error_type": error_type,
+                        "response_id": str(getattr(response_obj, "id", "")),
+                    },
+                )
+                if not audit_result["logged"]:
+                    logger.error("Completion failure audit could not be persisted: %s", audit_result.get("error"))
+        except Exception as e:
+            logger.warning(f"Failed to record completion failure: {e}")
 
 
 proxy_handler_instance = QuotaLoggingHandler()

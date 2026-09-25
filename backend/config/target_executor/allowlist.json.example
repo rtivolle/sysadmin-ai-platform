@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "test_hooks": false,
+  "staging_dir": "/var/lib/sysadmin-target-exec/staging",
+  "systemctl": "/usr/bin/systemctl",
+  "timeout_seconds": 30,
+  "services": [
+    "nginx",
+    "traefik",
+    "valkey",
+    "victorialogs",
+    "seaweedfs",
+    "postgresql",
+    "dsh-agent",
+    "dsh-sysadmin",
+    "litellm"
+  ],
+  "destinations": [
+    {"path": "/etc/nginx", "type": "dir"},
+    {"path": "/etc/traefik", "type": "dir"},
+    {"path": "/etc/systemd/system", "type": "dir"}
+  ],
+  "staging": {
+    "mode": "0600",
+    "owner": "nonroot"
+  },
+  "file_policy": {
+    "default_mode": "0644",
+    "default_owner": "root:root"
+  }
+}

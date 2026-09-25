@@ -520,6 +520,22 @@
   accent-color: var(--mila-blue);
 }
 
+/* Checkbox rows inside model parameter forms. */
+
+.mila-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0;
+  font-size: var(--mila-text-sm);
+  cursor: pointer;
+}
+
+.mila-check input {
+  width: auto;
+  accent-color: var(--mila-blue);
+}
+
 /* ── Skeleton page ──────────────────────────────────────────────────────── */
 
 .mila-skeleton-page {

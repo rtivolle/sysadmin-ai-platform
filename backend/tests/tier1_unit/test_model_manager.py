@@ -55,6 +55,19 @@ def test_registry_roundtrip_and_path_confinement(store):
     assert store.get("m1") is None
 
 
+def test_dtype_and_kv_cache_dtype_validators():
+    assert registry.validate_dtype("bfloat16") == "bfloat16"
+    assert registry.validate_dtype(None) is None
+    assert registry.validate_kv_cache_dtype("fp8_e5m2") == "fp8_e5m2"
+    assert registry.validate_kv_cache_dtype(None) is None
+    for bad in ("int4", 4, ["auto"]):
+        with pytest.raises(ValueError):
+            registry.validate_dtype(bad)
+    for bad in ("fp16", "int8", 4):
+        with pytest.raises(ValueError):
+            registry.validate_kv_cache_dtype(bad)
+
+
 def test_corrupt_registry_is_quarantined(tmp_path):
     path = tmp_path / "registry.json"
     path.write_text("{not json")
@@ -144,6 +157,24 @@ def test_gguf_download_rejects_symlink_result_and_records_failure(store, tmp_pat
     assert store.get("q9")["status"] == registry.STATUS_ERROR
 
 
+def test_gguf_download_accepts_symlinked_model_store_root(tmp_path):
+    real_models = tmp_path / "models-real"
+    real_models.mkdir()
+    linked_models = tmp_path / "models-link"
+    linked_models.symlink_to(real_models, target_is_directory=True)
+    store = ModelRegistry(path=str(tmp_path / "registry.json"), models_dir=str(linked_models))
+    store.upsert("q9", {"hf_repo": "org/q9", "engine": "llamacpp", "gguf_file": "q9.gguf",
+                         "status": registry.STATUS_REGISTERED})
+
+    def file_download(**kwargs):
+        path = os.path.join(kwargs["local_dir"], kwargs["filename"])
+        with open(path, "wb") as handle:
+            handle.write(b"gguf")
+        return path
+
+    assert downloader.download_sync("q9", store, file_download_fn=file_download)["status"] == registry.STATUS_DOWNLOADED
+
+
 def test_start_download_rejects_concurrent(store, monkeypatch):
     store.upsert("m1", {"hf_repo": "org/m1", "status": registry.STATUS_REGISTERED})
     monkeypatch.setattr(downloader, "_run_job", lambda *a, **k: None)
@@ -197,6 +228,19 @@ def test_build_command_includes_flags(monkeypatch):
     assert "--quantization" in command and "awq" in command
 
 
+def test_build_command_includes_new_vllm_flags(monkeypatch):
+    monkeypatch.setenv("VLLM_BIN", "/fake/vllm")
+    monkeypatch.setenv("VLLM_CONFIG", "")
+    command = vllm_server.build_command(
+        {"name": "m1", "path": "/models/m1", "dtype": "bfloat16", "kv_cache_dtype": "fp8",
+         "max_num_seqs": 48, "enforce_eager": False, "enable_prefix_caching": True}, 8100)
+    assert command[:3] == ["/fake/vllm", "serve", "/models/m1"]
+    assert command[-8:] == [
+        "--dtype", "bfloat16", "--kv-cache-dtype", "fp8", "--max-num-seqs", "48",
+        "--no-enforce-eager", "--enable-prefix-caching",
+    ]
+
+
 def test_vllm_start_and_stop_lifecycle(store, monkeypatch):
     monkeypatch.setattr(vllm_server, "vllm_bin", lambda: "/fake/vllm")
     monkeypatch.setattr(vllm_server, "_port_free", lambda port: True)
@@ -243,6 +287,39 @@ def test_llamacpp_command_defaults_and_child_cuda_path(store, monkeypatch):
     assert llamacpp_server._child_environment()["LD_LIBRARY_PATH"] == "/cuda/lib:/cublas/lib:/system/lib"
 
 
+def test_llamacpp_command_extra_loading_flags(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_BIN", "/opt/llama/llama-server")
+    command = llamacpp_server.build_command({
+        "name": "q9", "ctx_size": 8192, "n_gpu_layers": 24, "flash_attn": False,
+        "threads": 8, "batch_size": 512, "mmap": False, "mlock": True,
+    }, 8110, "/managed/q9/model.gguf")
+    assert command == [
+        "/opt/llama/llama-server", "--model", "/managed/q9/model.gguf", "--alias", "q9",
+        "--host", "127.0.0.1", "--port", "8110", "--ctx-size", "8192", "--parallel", "1",
+        "--n-gpu-layers", "24", "--flash-attn", "off", "--reasoning", "off",
+        "--threads", "8", "--batch-size", "512", "--no-mmap", "--mlock",
+    ]
+
+
+def test_llamacpp_cleared_fields_fall_back_to_defaults(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_BIN", "/opt/llama/llama-server")
+    command = llamacpp_server.build_command(
+        {"name": "q9", "ctx_size": None, "n_gpu_layers": None, "flash_attn": None},
+        8110, "/managed/q9/model.gguf")
+    assert command == [
+        "/opt/llama/llama-server", "--model", "/managed/q9/model.gguf", "--alias", "q9",
+        "--host", "127.0.0.1", "--port", "8110", "--ctx-size", "2048", "--parallel", "1",
+        "--n-gpu-layers", "all", "--flash-attn", "on", "--reasoning", "off",
+    ]
+
+
+def test_llamacpp_loading_flag_validation(monkeypatch):
+    monkeypatch.setenv("LLAMACPP_BIN", "/opt/llama/llama-server")
+    for bad in ({"threads": 0}, {"threads": -2}, {"batch_size": 0}):
+        with pytest.raises(ValueError):
+            llamacpp_server.build_command({"name": "q9", **bad}, 8110, "/m/q9.gguf")
+
+
 def test_llamacpp_path_is_confined_and_rejects_symlink(store, tmp_path):
     store.upsert("q9", {"hf_repo": "org/q9", "engine": "llamacpp", "gguf_file": "q9.gguf"})
     model_dir = store.path_for("q9")
@@ -276,6 +353,30 @@ def test_llamacpp_liveness_does_not_probe_or_signal_on_transient_health_failure(
     monkeypatch.setattr(llamacpp_server, "_default_health", lambda _port: probes.append(_port) or False)
     assert llamacpp_server.is_running(store.get("q9"), store)
     assert probes == []
+
+
+def test_llamacpp_process_identity_rejects_recycled_pid(store, monkeypatch):
+    model_dir = store.path_for("q9")
+    os.makedirs(model_dir, exist_ok=True)
+    expected_model = os.path.join(os.path.realpath(model_dir), "q9.gguf")
+    entry = {"name": "q9", "gguf_file": "q9.gguf",
+             "server": {"pid": 4343, "port": 8124, "status": "running"}}
+    argv = ["/opt/llama-server", "--model", expected_model, "--alias", "q9", "--host", "127.0.0.1",
+            "--port", "8124"]
+    import builtins
+    from io import BytesIO
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/4343/cmdline":
+            return BytesIO("\0".join(argv).encode() + b"\0")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(vllm_server, "process_alive", lambda _pid: True)
+    assert llamacpp_server.process_matches(entry, store)
+    argv[3] = "other-model"
+    assert not llamacpp_server.process_matches(entry, store)
 
 
 def test_llamacpp_stop_waits_for_pid_before_releasing_port(store, monkeypatch):
@@ -323,6 +424,33 @@ def test_llamacpp_stop_does_not_signal_pid_reused_by_another_process(store, monk
     stopped = llamacpp_server.stop("q9", store)
     assert signals == []
     assert stopped["status"] == registry.STATUS_STOPPED
+
+
+def test_model_read_retains_pid_and_port_if_reap_is_unconfirmed(store, monkeypatch):
+    store.upsert("q9", {"hf_repo": "org/q9", "engine": "llamacpp", "gguf_file": "q9.gguf",
+                         "status": registry.STATUS_RUNNING,
+                         "server": {"pid": 4343, "port": 8124, "status": "running"}})
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(llamacpp_server, "process_matches", lambda _entry, _store: False)
+    monkeypatch.setattr(llamacpp_server, "stop", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("D-state")))
+    result = model_router._public(store.get("q9"))
+    assert result["status"] == registry.STATUS_ERROR
+    assert result["server"]["pid"] == 4343
+    assert result["server"]["port"] == 8124
+
+
+def test_start_sentinel_blocks_delete_before_registry_status_changes(store, monkeypatch):
+    store.upsert("q9", {"hf_repo": "org/q9", "engine": "llamacpp", "gguf_file": "q9.gguf",
+                         "status": registry.STATUS_DOWNLOADED,
+                         "server": {"pid": None, "port": None, "status": "stopped"}})
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {"q9": {"status": "starting"}})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    request = Request({"type": "http", "method": "DELETE", "path": "/api/v1/models/q9", "headers": []})
+    with pytest.raises(HTTPException) as exc:
+        model_router.delete_model("q9", request, delete_files=1)
+    assert exc.value.status_code == 409
+    assert store.get("q9") is not None
 
 
 def test_llamacpp_start_and_stop_lifecycle(store, monkeypatch, tmp_path):
@@ -522,6 +650,76 @@ async def test_running_model_cannot_be_reregistered_and_orphaned(api_env, store,
     assert store.get("q9")["gguf_file"] == "q9.gguf"
 
 
+@pytest.mark.asyncio
+async def test_register_accepts_new_vllm_loading_parameters(api_env, store):
+    async with await _client() as client:
+        created = await client.post("/api/v1/models", headers=api_env, json={
+            "hf_repo": "org/m", "name": "m", "dtype": "bfloat16", "kv_cache_dtype": "fp8",
+            "max_num_seqs": 32, "enforce_eager": False, "enable_prefix_caching": True,
+        })
+        assert created.status_code == 201
+        model = created.json()["model"]
+        assert model["dtype"] == "bfloat16"
+        assert model["kv_cache_dtype"] == "fp8"
+        assert model["max_num_seqs"] == 32
+        assert model["enforce_eager"] is False
+        assert model["enable_prefix_caching"] is True
+        bad = await client.post("/api/v1/models", headers=api_env,
+                                json={"hf_repo": "org/x", "name": "x", "dtype": "int4"})
+        assert bad.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_patch_model_updates_and_clears_loading_parameters(api_env, store):
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "dtype": "half",
+                       "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+    async with await _client() as client:
+        updated = await client.patch("/api/v1/models/m", headers=api_env,
+                                     json={"dtype": "bfloat16", "max_num_seqs": 32,
+                                           "enforce_eager": False, "enable_prefix_caching": True})
+        assert updated.status_code == 200
+        model = updated.json()["model"]
+        assert model["dtype"] == "bfloat16"
+        assert model["max_num_seqs"] == 32
+        assert model["enforce_eager"] is False
+        assert model["enable_prefix_caching"] is True
+        cleared = await client.patch("/api/v1/models/m", headers=api_env, json={"dtype": None})
+        assert cleared.status_code == 200
+        assert store.get("m")["dtype"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_model_rejects_unknown_fields_and_wrong_engine(api_env, store):
+    store.upsert("q9", {"hf_repo": "org/q9", "engine": "llamacpp", "gguf_file": "q9.gguf",
+                        "status": registry.STATUS_DOWNLOADED,
+                        "server": {"pid": None, "port": None, "status": "stopped"}})
+    async with await _client() as client:
+        unknown = await client.patch("/api/v1/models/q9", headers=api_env, json={"hf_repo": "org/x"})
+        assert unknown.status_code == 400
+        wrong_engine = await client.patch("/api/v1/models/q9", headers=api_env, json={"dtype": "auto"})
+        assert wrong_engine.status_code == 400
+        bad_value = await client.patch("/api/v1/models/q9", headers=api_env, json={"ctx_size": 64})
+        assert bad_value.status_code == 400
+        good = await client.patch("/api/v1/models/q9", headers=api_env,
+                                  json={"ctx_size": 4096, "threads": 8, "mmap": False})
+        assert good.status_code == 200
+        model = good.json()["model"]
+        assert model["ctx_size"] == 4096
+        assert model["threads"] == 8
+        assert model["mmap"] is False
+
+
+@pytest.mark.asyncio
+async def test_patch_model_rejected_while_running(api_env, store, monkeypatch):
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_RUNNING,
+                       "server": {"pid": 1, "port": 8100, "status": "running"}})
+    monkeypatch.setattr(model_router.vllm_server, "is_running", lambda _entry: True)
+    async with await _client() as client:
+        response = await client.patch("/api/v1/models/m", headers=api_env, json={"dtype": "auto"})
+    assert response.status_code == 409
+
+
 def test_concurrent_start_requests_share_one_start_sentinel(store, monkeypatch):
     store.upsert("q9", {"hf_repo": "org/q9", "engine": "llamacpp", "gguf_file": "q9.gguf",
                          "status": registry.STATUS_DOWNLOADED,
@@ -595,3 +793,276 @@ async def test_models_api_download_start_and_delete(api_env, store, monkeypatch)
         deleted = await client.delete("/api/v1/models/model", headers=api_env)
         assert deleted.status_code == 200
         assert store.get("model") is None
+
+
+# --- lifecycle failure-branch audit census ------------------------------------
+
+def _audit_capture(monkeypatch):
+    events = []
+    monkeypatch.setattr(model_router, "_audit",
+                        lambda reviewer, action, parameters, exit_code=0, extra=None:
+                        events.append((reviewer, action, parameters, exit_code, extra)))
+    return events
+
+
+def _request(method, path):
+    return Request({"type": "http", "method": method, "path": path, "headers": []})
+
+
+def test_rejected_start_branches_are_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    request = _request("POST", "/api/v1/models/x/start")
+
+    with pytest.raises(HTTPException) as exc:
+        model_router.start_model("ghost", request)
+    assert exc.value.status_code == 404
+    assert ("sysadmin-admin", "model_start", {"name": "ghost"}, 1, {"reason": "unknown_model"}) in events
+
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_REGISTERED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+    with pytest.raises(HTTPException) as exc:
+        model_router.start_model("m", request)
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_start", {"name": "m"}, 1, {"reason": "not_downloaded"}) in events
+
+
+def test_download_rejection_and_failure_are_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    request = _request("POST", "/api/v1/models/m/download")
+
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADING,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+    with pytest.raises(HTTPException) as exc:
+        model_router.download_model("m", request)
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_download", {"name": "m"}, 1, {"reason": "active_operation"}) in events
+
+    store.update("m", status=registry.STATUS_REGISTERED)
+
+    def fail(_name, _registry_obj):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(model_router.downloader, "start_download", fail)
+    with pytest.raises(HTTPException) as exc:
+        model_router.download_model("m", request)
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_download", {"name": "m"}, 1,
+            {"reason": "start_failed", "error": "disk full"}) in events
+
+
+def test_start_job_failure_is_audited_with_reviewer(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS",
+                        {"m": {"status": "starting", "started_at": 0, "error": None, "reviewer": "sysadmin-admin"}})
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+
+    def fail(_name, _registry_obj):
+        raise RuntimeError("cuda boom")
+
+    monkeypatch.setattr(model_router.vllm_server, "start", fail)
+    model_router._start_job("m")
+    assert store.get("m")["status"] == registry.STATUS_ERROR
+    assert any(action == "model_start" and exit_code == 1 and extra["reason"] == "start_failed"
+               and "cuda boom" in extra["error"] and extra["cleanup_not_confirmed"] is False
+               and reviewer == "sysadmin-admin"
+               for reviewer, action, parameters, exit_code, extra in events)
+
+
+def test_stop_restart_delete_rejections_are_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_STARTING,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+    with pytest.raises(HTTPException) as exc:
+        model_router.stop_model("m", _request("POST", "/api/v1/models/m/stop"))
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_stop", {"name": "m"}, 1, {"reason": "starting"}) in events
+
+    with pytest.raises(HTTPException) as exc:
+        model_router.restart_model("m", _request("POST", "/api/v1/models/m/restart"))
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_restart", {"name": "m"}, 1, {"reason": "starting"}) in events
+
+    store.update("m", status=registry.STATUS_DOWNLOADED, server={"pid": 1, "port": 8100, "status": "running"})
+    monkeypatch.setattr(model_router.vllm_server, "is_running", lambda entry: True)
+    with pytest.raises(HTTPException) as exc:
+        model_router.delete_model("m", _request("DELETE", "/api/v1/models/m"))
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_delete", {"name": "m"}, 1, {"reason": "running"}) in events
+
+
+class FakeRequest:
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+@pytest.mark.parametrize("action,endpoint,verb,path", [
+    ("model_download", "download_model", "POST", "/api/v1/models/ghost/download"),
+    ("model_stop", "stop_model", "POST", "/api/v1/models/ghost/stop"),
+    ("model_restart", "restart_model", "POST", "/api/v1/models/ghost/restart"),
+    ("model_delete", "delete_model", "DELETE", "/api/v1/models/ghost"),
+])
+def test_unknown_model_audits_each_lifecycle_endpoint(store, monkeypatch, action, endpoint, verb, path):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    with pytest.raises(HTTPException) as exc:
+        getattr(model_router, endpoint)("ghost", _request(verb, path))
+    assert exc.value.status_code == 404
+    assert ("sysadmin-admin", action, {"name": "ghost"}, 1, {"reason": "unknown_model"}) in events
+
+
+@pytest.mark.asyncio
+async def test_register_failure_branches_are_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+
+    with pytest.raises(HTTPException) as exc:
+        await model_router.register_model(FakeRequest(["not", "a", "dict"]))
+    assert exc.value.status_code == 400
+    assert ("sysadmin-admin", "model_register", {}, 1, {"reason": "invalid_body"}) in events
+
+    with pytest.raises(HTTPException) as exc:
+        await model_router.register_model(FakeRequest({"hf_repo": "not a repo"}))
+    assert exc.value.status_code == 400
+    assert any(action == "model_register" and code == 1 and extra["reason"] == "validation"
+               for _, action, _, code, extra in events)
+
+
+@pytest.mark.asyncio
+async def test_register_active_model_is_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    monkeypatch.setattr(model_router.vllm_server, "is_running", lambda entry: True)
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_RUNNING,
+                       "server": {"pid": 1, "port": 8100, "status": "running"}})
+    with pytest.raises(HTTPException) as exc:
+        await model_router.register_model(FakeRequest({"hf_repo": "org/m"}))
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_register", {"name": "m", "hf_repo": "org/m"}, 1,
+            {"reason": "active_operation"}) in events
+
+
+def test_start_already_running_and_active_operation_are_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    request = _request("POST", "/api/v1/models/m/start")
+
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": 1, "port": 8100, "status": "running"}})
+    monkeypatch.setattr(model_router.vllm_server, "is_running", lambda entry: True)
+    with pytest.raises(HTTPException) as exc:
+        model_router.start_model("m", request)
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_start", {"name": "m"}, 1, {"reason": "already_running"}) in events
+
+    monkeypatch.setattr(model_router.vllm_server, "is_running", lambda entry: False)
+    monkeypatch.setattr(model_router, "_START_JOBS",
+                        {"m": {"status": "starting", "started_at": 0, "error": None}})
+    store.update("m", server={"pid": None, "port": None, "status": "stopped"})
+    with pytest.raises(HTTPException) as exc:
+        model_router.start_model("m", request)
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_start", {"name": "m"}, 1, {"reason": "active_operation"}) in events
+
+
+def test_start_spawn_failure_is_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    monkeypatch.setattr(model_router.vllm_server, "is_running", lambda entry: False)
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+
+    class SpawnFails:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("spawn denied")
+
+    monkeypatch.setattr(model_router.threading, "Thread", SpawnFails)
+    with pytest.raises(RuntimeError, match="spawn denied"):
+        model_router.start_model("m", _request("POST", "/api/v1/models/m/start"))
+    assert ("sysadmin-admin", "model_start", {"name": "m"}, 1, {"reason": "spawn_failed"}) in events
+
+
+def test_stop_failure_is_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+
+    def fail(_name, _registry_obj):
+        raise RuntimeError("reap denied")
+
+    monkeypatch.setattr(model_router.vllm_server, "stop", fail)
+    with pytest.raises(RuntimeError, match="reap denied"):
+        model_router.stop_model("m", _request("POST", "/api/v1/models/m/stop"))
+    assert ("sysadmin-admin", "model_stop", {"name": "m"}, 1,
+            {"reason": "stop_failed", "error": "reap denied"}) in events
+
+
+def test_restart_stop_failure_is_audited(store, monkeypatch):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+
+    def fail(_name, _registry_obj):
+        raise RuntimeError("reap denied")
+
+    monkeypatch.setattr(model_router.vllm_server, "stop", fail)
+    with pytest.raises(RuntimeError, match="reap denied"):
+        model_router.restart_model("m", _request("POST", "/api/v1/models/m/restart"))
+    assert ("sysadmin-admin", "model_restart", {"name": "m"}, 1,
+            {"reason": "stop_failed", "error": "reap denied"}) in events
+
+
+def test_delete_rejected_branches_are_audited(store, monkeypatch, tmp_path):
+    events = _audit_capture(monkeypatch)
+    monkeypatch.setattr(model_router, "model_registry", store)
+    monkeypatch.setattr(model_router, "require_admin", lambda _request: "sysadmin-admin")
+    store.upsert("m", {"hf_repo": "org/m", "engine": "vllm", "status": registry.STATUS_DOWNLOADED,
+                       "server": {"pid": None, "port": None, "status": "stopped"}})
+
+    monkeypatch.setattr(model_router, "_START_JOBS", {"m": {"status": "starting", "started_at": 0, "error": None}})
+    with pytest.raises(HTTPException) as exc:
+        model_router.delete_model("m", _request("DELETE", "/api/v1/models/m"))
+    assert exc.value.status_code == 409
+    assert ("sysadmin-admin", "model_delete", {"name": "m"}, 1, {"reason": "active_operation"}) in events
+
+    monkeypatch.setattr(model_router, "_START_JOBS", {})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store.update("m", path=str(outside))
+    with pytest.raises(HTTPException) as exc:
+        model_router.delete_model("m", _request("DELETE", "/api/v1/models/m"), delete_files=1)
+    assert exc.value.status_code == 400
+    assert ("sysadmin-admin", "model_delete", {"name": "m"}, 1, {"reason": "path_escape"}) in events

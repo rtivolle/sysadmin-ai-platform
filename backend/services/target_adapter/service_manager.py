@@ -10,16 +10,27 @@ import subprocess
 from typing import Tuple, Optional
 
 from .config import validate_target_service
+from .executor import TargetExecutorClient, get_executor_mode
 
 logger = logging.getLogger("target_adapter.service_manager")
 
 
 class ServiceManager:
-    def __init__(self, simulation: Optional[bool] = None):
+    def __init__(
+        self,
+        simulation: Optional[bool] = None,
+        mode: Optional[str] = None,
+        executor: Optional[TargetExecutorClient] = None,
+    ):
         if simulation is not None:
             self.simulation = simulation
         else:
             self.simulation = os.getenv("TARGET_ADAPTER_SIMULATION", "0") == "1"
+        self.mode = mode if mode is not None else get_executor_mode()
+        self.executor = (
+            executor if executor is not None
+            else (TargetExecutorClient() if self.mode == "sudo" else None)
+        )
 
     def execute_action(self, action: str, service: str) -> Tuple[int, str, str]:
         """
@@ -31,6 +42,15 @@ class ServiceManager:
         if action not in ("service_restart", "service_reload", "service_status"):
             raise ValueError(f"Unsupported service action: {action}")
 
+        if self.simulation or self.mode == "simulation":
+            logger.info("[SIMULATION] service action %s on %s", action, canonical_service)
+            if action == "service_status":
+                return 0, "active\n", ""
+            return 0, f"Service {canonical_service} {action.split('_')[1]}ed successfully (simulated)\n", ""
+
+        if self.mode == "sudo":
+            return self.executor.service_action(action, canonical_service)
+
         systemctl_bin = shutil.which("systemctl") or "/usr/bin/systemctl"
 
         if action == "service_restart":
@@ -41,12 +61,6 @@ class ServiceManager:
             cmd = [systemctl_bin, "is-active", f"{canonical_service}.service"]
         else:
             raise ValueError(f"Unknown action: {action}")
-
-        if self.simulation:
-            logger.info("[SIMULATION] Executing: %s", " ".join(cmd))
-            if action == "service_status":
-                return 0, "active\n", ""
-            return 0, f"Service {canonical_service} {action.split('_')[1]}ed successfully (simulated)\n", ""
 
         try:
             res = subprocess.run(

@@ -314,6 +314,16 @@ export function createGateway({
           upstreamResponse.resume()
           return res.end()
         }
+        // A committed response must not be rewritten. If a gatekeeper before
+        // this proxy already answered (a bug in its handled flag), writeHead
+        // threw ERR_HTTP_HEADERS_SENT inside this callback and killed the whole
+        // gateway. Drop the upstream body instead of crashing.
+        if (res.headersSent) {
+          log(`dropping proxy response for ${instance.userId}: response already sent`)
+          upstreamResponse.resume()
+          if (!res.writableEnded) res.destroy()
+          return
+        }
         const responseHeaders = { ...upstreamResponse.headers }
         for (const name of Object.keys(responseHeaders)) {
           if (HOP_BY_HOP.has(name.toLowerCase())) delete responseHeaders[name]

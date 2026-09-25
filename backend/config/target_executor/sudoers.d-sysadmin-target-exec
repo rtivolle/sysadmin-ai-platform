@@ -1,0 +1,26 @@
+# /etc/sudoers.d/sysadmin-target-exec
+#
+# Grants the dedicated, unprivileged `sysadmin-agent` account passwordless
+# sudo ONLY for the standalone least-privilege executor. This is the single
+# privilege-acquisition path of the platform: everything the agent does to a
+# host service or configuration file flows through this one executable.
+#
+# Why there are no argument wildcards:
+#   sudo's argument matching is fnmatch-based on the raw command line. A
+#   wildcard such as `... /usr/local/libexec/sysadmin-target-exec *` would let
+#   a compromised adapter pass ANY arguments to the executor. We deliberately
+#   do not try to enumerate the exact verbs/units/paths in sudo, because that
+#   enumeration cannot be expressed safely in sudo syntax and would silently
+#   drift from the executor's own allowlist. Instead we allow the single,
+#   fixed executable and let the executor enforce the exact allowlist from its
+#   root-owned /etc/sysadmin-target-exec/allowlist.json. The executor rejects
+#   any verb, unit, or destination it has not been configured to accept, before
+#   taking any side effect.
+#
+# Why no SETENV / NOPASSWD:ALL:
+#   sudo's default env_reset strips the caller's environment. We rely on that:
+#   without SETENV, the adapter cannot smuggle TARGET_EXEC_ALLOWLIST_PATH or
+#   TARGET_EXEC_SYSTEMCTL (test-only overrides) into the root executor. There
+#   is no entry that permits running an arbitrary command.
+#
+sysadmin-agent ALL=(root) NOPASSWD: /usr/local/libexec/sysadmin-target-exec

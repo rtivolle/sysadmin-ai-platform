@@ -1,0 +1,45 @@
+# Decision records — plan/spec divergences
+
+This directory records **every place the implemented system diverges from the
+source specifications (`docs/specs/`) and the implementation baseline
+(`docs/plans/DEVELOPMENT_PLAN.md` §3/§4)**. It is the deliverable for work item
+PR-D5 in `docs/plans/PRODUCTION_READINESS.md`.
+
+Each record is MADR-style: **Context**, **Decision**, **Status**, **Consequences**,
+**Evidence** (with the exact test/files that qualify the contract), and
+**Corrective work** when a divergence is not yet qualified.
+
+Status values follow MADR but default to **Proposed** (owner acceptance pending)
+because no source document records explicit owner acceptance of these choices;
+where a divergence is already documented as intentional (e.g. in
+`docs/development.md` §5 or `DEVELOPMENT_PLAN.md` §3), the record says so.
+
+## Index
+
+| ADR | Divergence (plan/spec → implementation) | Status | Qualified? | Evidence / corrective item |
+|---|---|---|---|---|
+| [ADR-0001](ADR-0001-file-based-keys-valkey-no-postgresql.md) | PostgreSQL-backed LiteLLM virtual keys → file-based bearer keys + Valkey state | Proposed | **No** | No key rotation/revocation test; no key restart-durability test. Corrective work required. |
+| [ADR-0002](ADR-0002-no-nvidia-dynamo.md) | NVIDIA Dynamo (KV routing, P/D disaggregation) → not implemented | Proposed | **Yes (scope reduction)** | Deferral recorded in plan §1/§3/§5; no Dynamo code. |
+| [ADR-0003](ADR-0003-simulated-inference-fallback.md) | Standalone vLLM → deterministic simulator + optional upstream proxy | Proposed | **Partial** | Fail-closed routing qualified (`test_inference_gateway.py`); no real vLLM run. Corrective: PR-C1. |
+| [ADR-0004](ADR-0004-llamacpp-engine-added.md) | vLLM-only → llama.cpp (GGUF) engine added | Proposed | **Partial** | Unit-qualified (`test_model_manager.py` llama.cpp tests); no live download/start. Corrective: Phase 2 live. |
+| [ADR-0005](ADR-0005-zero-docker-native-processes.md) | Docker Compose → zero-Docker native processes (SeaweedFS/VictoriaLogs/Valkey) | Proposed | **Yes** | Live bring-up + backup/restore tests (`test_platform.py`, `restore_drill.py`). |
+| [ADR-0006](ADR-0006-local-login-no-idp.md) | LDAP/OIDC/PAM IdP → local PBKDF2 login + bearer keys | Proposed | **Partial** | Login + identity-integrity tests; no IdP adapter. Corrective: AUTH-01. |
+| [ADR-0007](ADR-0007-single-host-topology.md) | Multi-machine/cluster → single-host loopback | Proposed | **Partial** | Single-host reachability tested; 3-machine split (PR-H1) unimplemented. |
+| [ADR-0008](ADR-0008-port-and-layout-choices.md) | Spec port map (dsh 3080, Traefik 80/443) → agent 3080 collision, Traefik 8080/8443, harness 3085/3180–3280 | Proposed | **Partial** | Port wiring tested live; 3080 collision documented, not tested. |
+| [ADR-0009](ADR-0009-sandbox-systemd-run-no-seccomp.md) | Plain bwrap (spec 04) → systemd-run/manual cgroup v2, no seccomp, 15s+5s | Proposed | **Partial** | Fail-closed + isolation + stress tests; no seccomp; raw cgroup leg fail-closed only (PR-B2). |
+| [ADR-0010](ADR-0010-harness-opt-in-vs-react-runtime.md) | dsh is THE runtime → backend ReAct runtime + opt-in dsh gateway | Proposed | **Partial** | Policy parity + harness node tests; no end-to-end dual-runtime parity. |
+| [ADR-0011](ADR-0011-p1-bounded-elevation.md) | "Unlimited" P1 key → time-bounded, quota-raised elevation | Proposed | **Yes** | Lifecycle/revocation/bypass tests (`test_m3_p1_elevation.py`, `test_m3_adversarial_p1_dr.py`). |
+| [ADR-0012](ADR-0012-daily-token-ledger.md) | Monetary `max_budget` 2000 → separate daily token ledger | Proposed | **Yes** | `test_daily_token_reservation.py`, `test_rate_limits.py`, `test_empirical_challenger.py`. |
+| [ADR-0013](ADR-0013-audit-integrity-archive.md) | "Immutable" audit → outbox + VictoriaLogs, no integrity archive | Proposed | **Partial** | Outbox durability qualified; no tamper-evident archival (PR-D2). |
+
+## Summary
+
+- **Qualified by tests (contract holds):** ADR-0002 (scope reduction), ADR-0005
+  (zero-Docker), ADR-0011 (P1), ADR-0012 (token ledger).
+- **Partially qualified (some contract tested, live/edge cases open):**
+  ADR-0003, ADR-0004, ADR-0006, ADR-0007, ADR-0008, ADR-0009, ADR-0010,
+  ADR-0013.
+- **Not qualified — corrective work required:** ADR-0001 (key
+  rotation/revocation and restart durability have **no** qualifying test, and no
+  mechanism exists; this is the only divergence with a fully unqualified
+  contract).

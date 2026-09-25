@@ -16,11 +16,47 @@ from .session_store import SessionStore
 from .react_loop import run_react_agent, run_react_agent_stream
 from .cancellation import registry
 from services.auth_gateway.quota_manager import quota_mgr, QuotaExceededException
+from services.agent_tools.audit import log_audit_event
 
 logger = logging.getLogger("agent_runtime.router")
 
 router = APIRouter()
 session_store = SessionStore()
+
+
+async def _audit_agent_cancel(user_id, session_id, request_id, cause):
+    """Best-effort audit of an in-flight request cancellation.
+
+    ``cause`` is one of ``user`` (via /agent/cancel), ``disconnect`` (SSE
+    client disconnect) or ``lease_lost`` (quota lease ownership lost). Emission
+    never changes the cancellation outcome.
+    """
+    try:
+        await asyncio.to_thread(
+            log_audit_event,
+            user_id=user_id,
+            session_id=session_id or "",
+            tool_name="agent_cancel",
+            action="agent_cancel",
+            exit_code=0,
+            extra={"cause": cause, "request_id": request_id or ""},
+        )
+    except Exception as exc:
+        print(f"[!] Audit emission failed for agent_cancel: {exc}", file=sys.stderr)
+
+
+async def _audit_disconnect_if_needed(record, request, user_id, session_id, request_id) -> bool:
+    """Report an SSE client disconnect and return True when the client is gone.
+
+    A user-initiated cancel is already reported by /agent/cancel (cause=user),
+    so a set ``cancel_event`` must not be double-reported as a disconnect.
+    """
+    if record.cancel_event.is_set():
+        return True
+    if request is not None and await request.is_disconnected():
+        await _audit_agent_cancel(user_id, session_id, request_id, "disconnect")
+        return True
+    return False
 
 def _default_authenticate_request(request: Request):
     """Delegate to auth_gateway server unless monkeypatched."""
@@ -29,12 +65,14 @@ def _default_authenticate_request(request: Request):
 
 authenticate_request = _default_authenticate_request
 
-async def _maintain_quota_lease(lease_id: str, stop_event: asyncio.Event, active_task: asyncio.Task) -> None:
+async def _maintain_quota_lease(lease_id: str, stop_event: asyncio.Event, active_task: asyncio.Task,
+                                user_id: Optional[str] = None, session_id: Optional[str] = None,
+                                request_id: Optional[str] = None, renew_interval: float = 30.0) -> None:
     """Renew a live request lease and stop work if ownership is lost."""
     last_success = time.monotonic()
     while not stop_event.is_set():
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=30.0)
+            await asyncio.wait_for(stop_event.wait(), timeout=renew_interval)
             return
         except asyncio.TimeoutError:
             pass
@@ -44,12 +82,14 @@ async def _maintain_quota_lease(lease_id: str, stop_event: asyncio.Event, active
         except ConnectionError:
             logger.warning("Quota lease renewal unavailable for %s", lease_id)
             if time.monotonic() - last_success >= 110:
+                await _audit_agent_cancel(user_id or "", session_id, request_id, "lease_lost")
                 active_task.cancel()
                 return
             continue
 
         if not renewed:
             logger.error("Quota lease ownership lost for %s; cancelling request", lease_id)
+            await _audit_agent_cancel(user_id or "", session_id, request_id, "lease_lost")
             active_task.cancel()
             return
         last_success = time.monotonic()
@@ -111,7 +151,10 @@ async def chat_endpoint(request_body: AgentChatRequest, request: Request):
         async def sse_stream_wrapper():
             current_task = asyncio.current_task()
             stop_renewal = asyncio.Event()
-            lease_task = asyncio.create_task(_maintain_quota_lease(lease_id, stop_renewal, current_task)) if current_task else None
+            lease_task = asyncio.create_task(
+                _maintain_quota_lease(lease_id, stop_renewal, current_task,
+                                      user_id=user_id, session_id=request_body.session_id, request_id=req_id)
+            ) if current_task else None
             try:
                 if current_task:
                     await registry.update_task(req_id, current_task)
@@ -123,7 +166,7 @@ async def chat_endpoint(request_body: AgentChatRequest, request: Request):
                     cancel_event=record.cancel_event,
                     http_request=request
                 ):
-                    if record.cancel_event.is_set() or (request and await request.is_disconnected()):
+                    if await _audit_disconnect_if_needed(record, request, user_id, request_body.session_id, req_id):
                         logger.info(f"Stream terminating early for req_id={req_id}")
                         break
                     yield sse_chunk
@@ -147,7 +190,10 @@ async def chat_endpoint(request_body: AgentChatRequest, request: Request):
     else:
         current_task = asyncio.current_task()
         stop_renewal = asyncio.Event()
-        lease_task = asyncio.create_task(_maintain_quota_lease(lease_id, stop_renewal, current_task)) if current_task else None
+        lease_task = asyncio.create_task(
+            _maintain_quota_lease(lease_id, stop_renewal, current_task,
+                                  user_id=user_id, session_id=request_body.session_id, request_id=req_id)
+        ) if current_task else None
         try:
             if current_task:
                 await registry.update_task(req_id, current_task)
@@ -176,6 +222,7 @@ async def cancel_endpoint(request_body: AgentCancelRequest, request: Request):
         if "Unauthorized" in msg:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
         return AgentCancelResponse(success=False, message=msg)
+    await _audit_agent_cancel(user_id, request_body.session_id, cancelled_id, "user")
     return AgentCancelResponse(success=True, message=msg, cancelled_request_id=cancelled_id)
 
 @router.get("/sessions")

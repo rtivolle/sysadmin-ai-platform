@@ -24,6 +24,7 @@ AGENTS.md                     this file
 README.md                     orientation and quick start
 Makefile                      golden commands (make help)
 install.sh                    dependency/binary install, credential provisioning
+update.sh                     platform self-update (git ff-only / --source overlay)
 platform.sh -> backend/platform.sh   service lifecycle (start/stop/test/harness)
 sysadmin-chat                 CLI launcher -> platform.sh chat
 pytest.ini                    pytest rootdir, pythonpath, asyncio mode
@@ -62,6 +63,7 @@ docs/                         documentation set (start at docs/README.md)
 ```bash
 make help                    # list every target
 make install                 # install.sh: deps, binaries, random credentials
+make update / update-check   # update.sh: self-update platform modules (ff-only)
 make start / stop / status   # platform.sh lifecycle
 make test                    # full pytest suite (no live services required)
 make test-live               # platform.sh test: starts services, end-to-end, stops
@@ -94,8 +96,8 @@ per-user bearer keys from those files.
 - **The JS policy port must match** `backend/services/approval_gate/filter.py`
   action-for-action; the parity test enforces it.
 - **Generated directories are off limits**: `backend/bin`, `backend/logs`,
-  `backend/run`, `backend/.venv`, `.pytest_cache`, and everything under
-  `backend/data/` except the tracked runbooks.
+  `backend/run`, `backend/.venv`, `backend/.vllm-venv`, `.pytest_cache`, and
+  everything under `backend/data/` except the tracked runbooks.
 - **Never fabricate evidence.** Report skips and environment limits explicitly;
   say "not measured" when it was not measured.
 - **Port 3080 must be free** for the agent platform. It is also the DeepSeek
@@ -130,7 +132,8 @@ per-user bearer keys from those files.
 | Harness package | `make harness-test && make harness-verify` |
 | Anything user-visible | update `docs/` and record results in `docs/status/TEST_READY.md` |
 
-Baseline on the development host (2026-09-24): the suite collects **436 tests**.
+Historical baseline on the development host (2026-09-24, before local model
+manager additions): the suite collected **436 tests**.
 With Valkey reachable and the other backend services stopped it reports
 **423 passed, 13 skipped** — eleven live auth/Traefik/Valkey challenger checks
 plus the seven `test_platform.py` sections, which skip when the stack is down
@@ -142,6 +145,14 @@ tests + 8/8 dsh checks + 37/37 live gateway checks** (`make harness-test`,
 `make harness-verify`, `packages/harness-integration/scripts/verify-live-gateway.mjs`).
 Treat these as a regression baseline, not a production acceptance certificate,
 and record new measurements in `docs/status/TEST_READY.md`.
+
+Current worktree baseline (2026-09-24): **530 tests collected**; with every
+backend service stopped **509 passed, 21 skipped**. The 21 skips are the seven
+live `test_platform.py` sections, one live admin-quota check, two live
+daily-token reservation checks, and eleven auth/Traefik/Valkey challenger
+checks. They are unavailable integration checks, not passing coverage. The
+current count includes model-manager vLLM/GGUF unit coverage; real manager-
+mediated GGUF download and GPU service startup remain separate live checks.
 
 ## 7. Environment notes
 

@@ -77,6 +77,19 @@ def build_command(entry: Dict[str, Any], port: int) -> list:
         "--port", str(port),
         "--served-model-name", entry["name"],
     ]
+    # Operator-owned config only: HTTP callers cannot select filesystem paths.
+    config = os.getenv("VLLM_CONFIG", os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "../../config/vllm/serve.yaml")))
+    if config:
+        import yaml
+        with open(config, encoding="utf-8") as handle:
+            settings = yaml.safe_load(handle)
+        if not isinstance(settings, dict) or any(not isinstance(k, str) for k in settings):
+            raise ValueError("VLLM_CONFIG must contain a YAML mapping")
+        protected = {"host", "port", "model", "served-model-name", "config", "uds"}
+        if protected.intersection(k.replace("_", "-") for k in settings):
+            raise ValueError("VLLM_CONFIG cannot override platform model/address settings")
+        command += ["--config", config]
     if entry.get("quantization"):
         command += ["--quantization", str(entry["quantization"])]
     if entry.get("max_model_len"):
@@ -85,6 +98,21 @@ def build_command(entry: Dict[str, Any], port: int) -> list:
         command += ["--tensor-parallel-size", str(int(entry["tensor_parallel_size"]))]
     if entry.get("gpu_memory_utilization"):
         command += ["--gpu-memory-utilization", str(entry["gpu_memory_utilization"])]
+    if entry.get("dtype"):
+        command += ["--dtype", str(entry["dtype"])]
+    if entry.get("kv_cache_dtype"):
+        command += ["--kv-cache-dtype", str(entry["kv_cache_dtype"])]
+    if entry.get("max_num_seqs"):
+        command += ["--max-num-seqs", str(int(entry["max_num_seqs"]))]
+    # Explicit booleans override the operator config file in both directions;
+    # an absent field inherits whatever VLLM_CONFIG (or the vLLM default) says.
+    for field, enabled_flag, disabled_flag in (
+        ("enforce_eager", "--enforce-eager", "--no-enforce-eager"),
+        ("enable_prefix_caching", "--enable-prefix-caching", "--no-enable-prefix-caching"),
+    ):
+        value = entry.get(field)
+        if type(value) is bool:
+            command += [enabled_flag if value else disabled_flag]
     return command
 
 

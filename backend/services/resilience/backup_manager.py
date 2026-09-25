@@ -213,9 +213,20 @@ class BackupManager:
             "aggregate_sha256": compute_dir_sha256(keys_dest),
         }
 
-    def create_backup(self, backup_id: Optional[str] = None) -> Dict[str, Any]:
+    def create_backup(
+        self,
+        backup_id: Optional[str] = None,
+        offhost_dest: Optional[str] = None,
+        offhost_retention_days: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
         Creates a full platform backup archive and manifest.json.
+
+        When ``offhost_dest`` is set (a local mount path or ``ssh://`` target),
+        the archive + manifest + SHA-256 sidecar are copied to that location and
+        verified after the copy; a failure raises ``OffhostBackupError`` rather
+        than returning a "successful" backup. ``offhost_retention_days`` triggers
+        pruning of older off-host archives (default 90).
         Returns:
             Dict containing manifest metadata and archive_path.
         """
@@ -267,6 +278,23 @@ class BackupManager:
 
             manifest["archive_path"] = str(archive_path)
             manifest["manifest_path"] = str(final_manifest_path)
+
+            # 5. Optional off-host copy with post-copy verification.
+            if offhost_dest:
+                from .offhost_backup import copy_archive_to_offhost, prune_offhost
+
+                offhost_result = copy_archive_to_offhost(
+                    archive_path,
+                    final_manifest_path,
+                    archive_sha256,
+                    offhost_dest,
+                )
+                manifest["offhost"] = offhost_result
+                with open(final_manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, indent=2)
+                if offhost_retention_days is not None:
+                    offhost_result["prune"] = prune_offhost(offhost_dest, offhost_retention_days)
+
             return manifest
 
         finally:

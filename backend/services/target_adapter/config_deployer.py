@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional, Tuple
 import yaml
 
 from .config import validate_target_config_path
+from .executor import TargetExecutorClient, get_executor_mode
 
 logger = logging.getLogger("target_adapter.config_deployer")
 
@@ -61,9 +62,25 @@ def validate_syntax(content: str, filename: str) -> Tuple[bool, Optional[str]]:
 class ConfigDeployer:
     """
     Staged configuration deployment engine.
+
+    In ``sudo`` mode (``TARGET_ADAPTER_EXECUTOR=sudo``) the adapter validates
+    and stages the content but delegates the actual write to the least-privilege
+    executor (``TargetExecutorClient``); it never writes the destination itself.
+    In ``direct`` mode (the default for dev/tests) it performs the staged
+    atomic deployment in-process, preserving the historical behaviour.
     """
-    def __init__(self, allow_tmp: bool = False):
+    def __init__(
+        self,
+        allow_tmp: bool = False,
+        mode: Optional[str] = None,
+        executor: Optional[TargetExecutorClient] = None,
+    ):
         self.allow_tmp = allow_tmp
+        self.mode = mode if mode is not None else get_executor_mode()
+        self.executor = (
+            executor if executor is not None
+            else (TargetExecutorClient() if self.mode == "sudo" else None)
+        )
 
     def deploy(
         self,
@@ -87,6 +104,19 @@ class ConfigDeployer:
         canonical_target = validate_target_config_path(target_path, allow_tmp=self.allow_tmp)
         target_dir = os.path.dirname(canonical_target)
         target_name = os.path.basename(canonical_target)
+
+        # Simulation mode: validate and report synthetic success; never write.
+        if self.mode == "simulation":
+            logger.info("[SIMULATION] config deploy to %s", canonical_target)
+            return {
+                "success": True,
+                "status": "succeeded",
+                "message": f"Successfully deployed configuration to {canonical_target} (simulated)",
+                "backup_path": None,
+                "base_hash": base_hash,
+                "deployed_hash": proposed_hash or hashlib.sha256(staged_content.encode("utf-8")).hexdigest(),
+                "rollback_performed": False,
+            }
 
         # Phase 2: Staged Content SHA-256 Verification (Tamper Check)
         actual_proposed_hash = hashlib.sha256(staged_content.encode("utf-8")).hexdigest()
@@ -143,6 +173,19 @@ class ConfigDeployer:
                     ),
                     "rollback_performed": False,
                 }
+
+        # Phase 5 (sudo mode): stage content and delegate the write to the
+        # least-privilege executor. The adapter never writes the destination
+        # itself in this mode.
+        if self.mode == "sudo":
+            return self._deploy_via_executor(
+                canonical_target=canonical_target,
+                target_name=target_name,
+                staged_content=staged_content,
+                proposed_hash=proposed_hash,
+                actual_base_hash=actual_base_hash,
+                approval_id=approval_id,
+            )
 
         # Phase 5: Backup Creation (in exact same directory)
         backup_path = None
@@ -245,6 +288,45 @@ class ConfigDeployer:
             "backup_path": backup_path,
             "base_hash": actual_base_hash,
             "deployed_hash": deployed_hash,
+            "rollback_performed": False,
+        }
+
+    def _deploy_via_executor(
+        self,
+        canonical_target: str,
+        target_name: str,
+        staged_content: str,
+        proposed_hash: Optional[str],
+        actual_base_hash: Optional[str],
+        approval_id: str,
+    ) -> Dict[str, Any]:
+        """Stage content into the staging dir and delegate the write to the executor."""
+        sha256 = proposed_hash or hashlib.sha256(staged_content.encode("utf-8")).hexdigest()
+
+        staged_path = None
+        try:
+            staged_path = self.executor.stage_content(staged_content)
+        except OSError as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "message": f"Failed to stage content for the executor: {exc}",
+                "rollback_performed": False,
+            }
+
+        try:
+            result = self.executor.config_install(staged_path, canonical_target, sha256)
+        finally:
+            self.executor.cleanup_staged(staged_path)
+
+        ok = bool(result.get("ok"))
+        return {
+            "success": ok,
+            "status": "succeeded" if ok else "failed",
+            "message": result.get("message", ""),
+            "backup_path": result.get("backup"),
+            "base_hash": actual_base_hash,
+            "deployed_hash": result.get("sha256"),
             "rollback_performed": False,
         }
 

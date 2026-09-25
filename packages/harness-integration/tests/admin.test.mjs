@@ -105,6 +105,10 @@ before(async () => {
           stubState.modelBody = JSON.parse(raw || '{}')
           return sendJson(res, 201, { model: { name: 'local-1' } })
         }
+        if (req.method === 'PATCH' && req.url === '/api/v1/models/local-1') {
+          stubState.modelBody = JSON.parse(raw || '{}')
+          return sendJson(res, 200, { model: { name: 'local-1', dtype: 'bfloat16' } })
+        }
         if (req.method === 'POST' && req.url.endsWith('/start')) return sendJson(res, 202, { status: 'starting' })
         if (req.method === 'DELETE') return sendJson(res, 200, { status: 'deleted' })
         return sendJson(res, 200, { status: 'ok' })
@@ -239,6 +243,30 @@ test('reports an authenticated admin session and an overview with the gateway', 
   assert.ok(body.gateway.sessions >= 1)
 })
 
+test('serves admin surfaces to a browser holding a user session without proxying them', async () => {
+  // A browser may hold both the gateway user cookie and the admin cookie. A
+  // fall-through here used to send the admin request on to the user's harness
+  // instance and crash the gateway with ERR_HTTP_HEADERS_SENT once the
+  // instance answered (server.js proxyHttp).
+  const userCookie = `${gateway.config.cookieName}=${gateway.sessions.create('sysadmin-01')}`
+  instanceCalls.length = 0
+
+  const page = await fetch(`${gatewayUrl}/admin`, {
+    headers: { cookie: userCookie, accept: 'text/html' },
+    redirect: 'manual',
+  })
+  assert.equal(page.status, 200)
+  assert.match(await page.text(), /<title>Mila/)
+
+  const probe = await fetch(`${gatewayUrl}/api/admin/session`, { headers: { cookie: userCookie } })
+  assert.equal(probe.status, 200)
+  assert.deepEqual(await probe.json(), {
+    authenticated: false, user: null, gateway: { port: gateway.config.port, backendUrl: gateway.config.agentUrl },
+  })
+
+  assert.equal(instanceCalls.filter(([name]) => name === 'ensure').length, 0, 'admin requests must not reach instances.ensure()')
+})
+
 test('lists opaque session handles, revokes one and stops its instance', async () => {
   const rawId = gateway.sessions.create('sysadmin-01')
   const handle = gateway.admin.shortId(rawId)
@@ -369,6 +397,13 @@ test('local model management is authenticated, CSRF-guarded and proxied', async 
   const registered = await adminFetch('/api/admin/local-models', { method: 'POST', body: { hf_repo: 'org/local-1' } })
   assert.equal(registered.status, 201)
   assert.deepEqual(stubState.modelBody, { hf_repo: 'org/local-1' })
+
+  const patched = await adminFetch('/api/admin/local-models/local-1', {
+    method: 'PATCH', body: { dtype: 'bfloat16', max_num_seqs: 32 },
+  })
+  assert.equal(patched.status, 200)
+  assert.equal((await patched.json()).model.dtype, 'bfloat16')
+  assert.deepEqual(stubState.modelBody, { dtype: 'bfloat16', max_num_seqs: 32 })
 
   assert.equal((await adminFetch('/api/admin/local-models/local-1/start', { method: 'POST', body: {} })).status, 202)
   assert.equal(

@@ -247,7 +247,8 @@ local vLLM or llama.cpp server per model. Full lifecycle, flags and limitations 
 |---|---|---|
 | GET | `/api/v1/models` | List registered models with status/server info. |
 | GET | `/api/v1/models/{name}` | One model plus its download-job status. |
-| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, engine?}` → `201`. `engine="llamacpp"` requires a `gguf_file` basename; optional `ctx_size`, `n_gpu_layers`, and `flash_attn`. |
+| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, engine?}` → `201`. `engine="llamacpp"` requires a `gguf_file` basename; optional loading parameters per engine (see [model-management.md §3.1](model-management.md)). |
+| PATCH | `/api/v1/models/{name}` | Update loading parameters of an inactive model; `null` clears a field. `409` while starting/downloading/running. |
 | POST | `/api/v1/models/{name}/download` | Start a background snapshot or single-GGUF download → `202`. |
 | POST | `/api/v1/models/{name}/start` | Start the configured vLLM or llama.cpp server → `202`. |
 | POST | `/api/v1/models/{name}/stop` | Stop the configured model server. |
@@ -346,6 +347,7 @@ keys are never returned.
 | GET | `/api/admin/models` | Model catalogue (ids and owners) plus the inference mode. Provider configuration and credentials are never returned. | LiteLLM `GET /models` + inference `GET /health` |
 | GET | `/api/admin/survey?refresh=0\|1` | Device/GPU/driver survey (cached 10 s; `refresh=1` re-runs the probes). | agent platform `GET /api/v1/survey` |
 | GET/POST | `/api/admin/local-models` | List or register local models. | agent platform `/api/v1/models` |
+| PATCH | `/api/admin/local-models/{name}` | Update a model's loading parameters (mutation-guarded). | agent platform `PATCH /api/v1/models/{name}` |
 | POST | `/api/admin/local-models/{name}/{download\|start\|stop\|restart\|delete}` | Local model lifecycle; `delete` accepts `?delete_files=1`. | agent platform `/api/v1/models/...` |
 | GET | `/api/admin/local-models/{name}/logs?tail=` | Tail the model's vLLM log. | agent platform `/api/v1/models/{name}/logs` |
 | GET | `/api/admin/services` | Service list with ports and pid liveness. | — |

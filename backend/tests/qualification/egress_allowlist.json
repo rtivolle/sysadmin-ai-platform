@@ -1,0 +1,115 @@
+{
+  "schema_version": 2,
+  "description": "Allowlist of outbound destinations and telemetry/cloud-fallback surfaces for the sysadmin AI platform. Every external destination found in the scanned tree MUST map to one entry here; an external host in runtime code that matches no entry makes `egress_audit.py` exit non-zero. `control_tokens` are the literal switch/env-var names searched for in the scanned code to decide whether the disable mechanism is already present.",
+  "classes": {
+    "install-time": "Artifact download that happens during install.sh / install-harness.sh; requires a mirror in a blocked-egress environment.",
+    "runtime-local": "Loopback / localhost / internal service address; no public egress.",
+    "runtime-external": "Reachable from service code at runtime; must be disabled or routed through a controlled import."
+  },
+  "destinations": [
+    {
+      "name": "HuggingFace Hub (model download)",
+      "pattern": "huggingface\\.co|huggingface_hub",
+      "class": "runtime-external",
+      "control": "HF_ENDPOINT=<internal mirror> + HF_HUB_OFFLINE=1",
+      "control_tokens": ["HF_ENDPOINT", "HF_HUB_OFFLINE"],
+      "note": "snapshot_download/hf_hub_download in model_manager/downloader.py. Controlled import: the admin API triggers an intentional download. The downloader already documents HF_ENDPOINT (mirror) and HF_HOME; HF_HUB_OFFLINE is honoured natively by huggingface_hub."
+    },
+    {
+      "name": "HuggingFace Hub telemetry",
+      "pattern": "HF_HUB_DISABLE_TELEMETRY",
+      "class": "runtime-external",
+      "control": "HF_HUB_DISABLE_TELEMETRY=1",
+      "control_tokens": ["HF_HUB_DISABLE_TELEMETRY"],
+      "note": "huggingface_hub sends anonymous usage events unless disabled. Not set anywhere in the platform; the operator must export it in the service environment (or the platform should set it when spawning downloads)."
+    },
+    {
+      "name": "vLLM usage stats",
+      "pattern": "vllm",
+      "class": "runtime-external",
+      "control": "VLLM_NO_USAGE_STATS=1 (or DO_NOT_TRACK=1)",
+      "control_tokens": ["VLLM_NO_USAGE_STATS", "DO_NOT_TRACK"],
+      "note": "vllm_server.py spawns `vllm serve` (via _default_popen) without disabling vLLM's usage-stats collector. The switch exists in vLLM but is NOT set by our supervisor; this is the one runtime-external destination lacking a disable switch in code."
+    },
+    {
+      "name": "LiteLLM telemetry",
+      "pattern": "telemetry",
+      "class": "runtime-external",
+      "control": "litellm_settings.telemetry: false",
+      "control_tokens": ["telemetry: false", "telemetry:false"],
+      "note": "backend/config/litellm/config.yaml already sets `telemetry: false`. Callbacks are pinned to the local auth_gateway handler, not a cloud sink."
+    },
+    {
+      "name": "DeepSeek Harness LLM endpoint",
+      "pattern": "SYSADMIN_LITELLM_URL|deepseek",
+      "class": "runtime-external",
+      "control": "SYSADMIN_LITELLM_URL=http://127.0.0.1:4000/v1",
+      "control_tokens": ["SYSADMIN_LITELLM_URL"],
+      "note": "The harness profile (cordis.patch.yml) and plugin default the LLM base URL to the LOCAL LiteLLM proxy, not api.deepseek.com."
+    },
+    {
+      "name": "DeepSeek Harness telemetry",
+      "pattern": "DSH_TELEMETRY_DISABLED",
+      "class": "runtime-external",
+      "control": "DSH_TELEMETRY_DISABLED=1",
+      "control_tokens": ["DSH_TELEMETRY_DISABLED"],
+      "note": "gateway/instance-manager.js sets DSH_TELEMETRY_DISABLED=1 on every harness spawn; verify-harness.mjs sets it too. Harness telemetry is disabled in code."
+    },
+    {
+      "name": "Mila branding link",
+      "pattern": "mila\\.quebec",
+      "class": "runtime-external",
+      "control": null,
+      "control_tokens": [],
+      "note": "Served as an <a href> in gateway HTML/CSS only; no automatic fetch, so no runtime data egress. Safe under blocked egress (browser-side, user-initiated)."
+    },
+    {
+      "name": "npm registry / DeepSeek Harness packages",
+      "pattern": "@deepseek-ai/|registry\\.npmjs\\.org|npm install|npm config",
+      "class": "install-time",
+      "control": "npm registry mirror + NO_UPDATE_NOTIFIER=1 + npmrc audit=false fund=false update-notifier=false",
+      "control_tokens": ["NO_UPDATE_NOTIFIER", "audit=false", "update-notifier=false"],
+      "note": "dsh CLI and @deepseek-ai/* bundles are fetched from the npm registry during install-harness.sh. Runtime imports resolve to the locally staged node_modules tree. npm/update-notifier telemetry is NOT disabled in code (install-time gap)."
+    },
+    {
+      "name": "PyPI (Python packages)",
+      "pattern": "pypi\\.org|pip install|PIP_INDEX_URL",
+      "class": "install-time",
+      "control": "PIP_INDEX_URL=<internal mirror> + PIP_NO_INDEX for fully offline",
+      "control_tokens": ["PIP_INDEX_URL", "PIP_NO_INDEX"],
+      "note": "install.sh runs pip install litellm[proxy] fastapi uvicorn httpx pyyaml redis pydantic huggingface_hub. Needs an internal PyPI mirror; PIP_INDEX_URL is not set in code."
+    },
+    {
+      "name": "GitHub release (Traefik)",
+      "pattern": "github\\.com/traefik/traefik/releases",
+      "class": "install-time",
+      "control": "static binary mirror (vendored into backend/bin)",
+      "control_tokens": [],
+      "note": "install.sh downloads the Traefik static binary."
+    },
+    {
+      "name": "GitHub release (VictoriaLogs)",
+      "pattern": "github\\.com/VictoriaMetrics/VictoriaLogs/releases",
+      "class": "install-time",
+      "control": "static binary mirror (vendored into backend/bin)",
+      "control_tokens": [],
+      "note": "install.sh downloads the VictoriaLogs static binary."
+    },
+    {
+      "name": "GitHub release (SeaweedFS)",
+      "pattern": "github\\.com/seaweedfs/seaweedfs/releases",
+      "class": "install-time",
+      "control": "static binary mirror (vendored into backend/bin)",
+      "control_tokens": [],
+      "note": "install.sh downloads the SeaweedFS static binary."
+    },
+    {
+      "name": "Valkey (download.valkey.io / Homebrew fallback)",
+      "pattern": "download\\.valkey\\.io|linuxbrew|brew install valkey",
+      "class": "install-time",
+      "control": "static binary mirror (pin + sha256, vendored into backend/bin) or distro package mirror",
+      "control_tokens": [],
+      "note": "install.sh resolves Valkey from PATH/Linuxbrew first, then downloads the sha256-verified prebuilt tarball from download.valkey.io, with apt/apk package fallbacks; a blocked-egress host should vendor the tarball or install valkey-server from the distro mirror."
+    }
+  ]
+}

@@ -102,17 +102,18 @@ def _verify_gguf_download(path: str, target: str, filename: str) -> str:
     root = os.path.realpath(target)
     expected = os.path.join(root, registry_module.validate_gguf_file(filename))
     downloaded = os.path.abspath(os.fspath(path))
+    if os.path.islink(downloaded):
+        raise ValueError("Downloaded GGUF must be a regular file, not a symlink")
+    resolved_download = os.path.realpath(downloaded)
+    if os.path.commonpath((resolved_download, root)) != root or resolved_download != expected:
+        raise ValueError("Downloaded GGUF path is outside the managed model directory")
     try:
-        if os.path.commonpath((downloaded, root)) != root or downloaded != expected:
-            raise ValueError("Downloaded GGUF path is outside the managed model directory")
         metadata = os.stat(downloaded, follow_symlinks=False)
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
         raise ValueError("Downloaded GGUF file is missing or unsafe") from exc
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError("Downloaded GGUF must be a regular file, not a symlink")
-    if os.path.realpath(downloaded) != downloaded:
-        raise ValueError("Downloaded GGUF resolves outside its managed path")
-    return downloaded
+    return resolved_download
 
 
 def download_sync(

@@ -33,6 +33,7 @@ requirement specifications:
 | [http-api.md](http-api.md) | Every HTTP endpoint exposed by the platform. |
 | [tools.md](tools.md) | Reference for the four bounded sysadmin tools. |
 | [operations.md](operations.md) | Install, start, stop, CLI usage, logs, dashboards and troubleshooting. |
+| [update.md](update.md) | Platform self-update (`update.sh`): fast-forward/overlay module updates, options, invariants and rollback. |
 | [configuration.md](configuration.md) | Configuration files, environment variables, ports and paths. |
 | [model-management.md](model-management.md) | Register, download and locally serve HuggingFace models through vLLM. |
 | [runbooks/vast-deepseek.md](runbooks/vast-deepseek.md) | Operator recipe for a remote multi-GPU deployment: the measured 4×H200 DeepSeek setup, CUDA/JIT prerequisites, DSH wiring and acceptance tests. |
@@ -51,7 +52,7 @@ requirement specifications:
 ## Reading paths
 
 - **Operator / sysadmin** — start with [operations.md](operations.md), then
-  [tools.md](tools.md), then [security.md](security.md).
+  [update.md](update.md), [tools.md](tools.md), then [security.md](security.md).
 - **Reviewer / security** — [architecture.md](architecture.md),
   [security.md](security.md), [testing.md](testing.md).
 - **Developer** — [development.md](development.md), [architecture.md](architecture.md),

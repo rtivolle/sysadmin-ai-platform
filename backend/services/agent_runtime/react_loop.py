@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import httpx
@@ -136,6 +137,31 @@ async def call_llm(
         raise ValueError("Inference gateway returned invalid message content")
     return content
 
+
+def _emit_agent_turn(user_id, session_id, model, exit_code, duration_ms=0, extra=None):
+    """Best-effort runtime-level audit of a completed or failed ReAct turn.
+
+    Audit emission must never change the turn's outcome: any exception is
+    reported to stderr and swallowed. Token counts are not known at this layer
+    (they are settled downstream by the LiteLLM handler), so they stay 0.
+    """
+    payload = {"model": model}
+    if extra:
+        payload.update(extra)
+    try:
+        log_audit_event(
+            user_id=user_id,
+            session_id=session_id,
+            tool_name="agent_turn",
+            action="agent_turn",
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            extra=payload,
+        )
+    except Exception as exc:
+        print(f"[!] Audit emission failed for agent_turn: {exc}", file=sys.stderr)
+
+
 async def run_react_agent(
     request: AgentChatRequest,
     user_id: str,
@@ -146,6 +172,8 @@ async def run_react_agent(
     tools_executed: List[ToolExecutionRecord] = []
     thought_steps: List[Dict[str, Any]] = []
     accumulated_citations: List[CitationRecord] = []
+    model = request.model or "fast-model"
+    started = time.monotonic()
 
     # 1. Build System Prompt
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -178,10 +206,21 @@ async def run_react_agent(
             except TypeError:
                 raw_output = await call_llm(llm_messages, request.model or "fast-model", user_id)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (401, 403, 429):
-                raise HTTPException(status_code=exc.response.status_code, detail="Inference gateway rejected the request") from exc
+            status_code = exc.response.status_code
+            _emit_agent_turn(
+                user_id, session.session_id, model, 1,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                extra={"error": "Inference gateway rejected the request", "http_status": status_code},
+            )
+            if status_code in (401, 403, 429):
+                raise HTTPException(status_code=status_code, detail="Inference gateway rejected the request") from exc
             raise HTTPException(status_code=502, detail="Inference gateway failed") from exc
         except (httpx.RequestError, OSError, ValueError, KeyError, IndexError) as exc:
+            _emit_agent_turn(
+                user_id, session.session_id, model, 1,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                extra={"error": "Inference gateway unavailable or returned an invalid response", "http_status": 502},
+            )
             raise HTTPException(status_code=502, detail="Inference gateway unavailable or returned an invalid response") from exc
         parsed = parse_model_output(raw_output, AVAILABLE_TOOLS)
 
@@ -243,6 +282,11 @@ async def run_react_agent(
                 ))
                 await session_store.save_session(session)
 
+                _emit_agent_turn(
+                    user_id, session.session_id, model, 0,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    extra={"approval_required": True},
+                )
                 return AgentChatResponse(
                     session_id=session.session_id,
                     user_id=user_id,
@@ -326,6 +370,11 @@ async def run_react_agent(
     ))
     await session_store.save_session(session)
 
+    _emit_agent_turn(
+        user_id, session.session_id, model, 0,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
+
     return AgentChatResponse(
         session_id=session.session_id,
         user_id=user_id,
@@ -353,6 +402,8 @@ async def run_react_agent_stream(
     tools_executed: List[ToolExecutionRecord] = []
     thought_steps: List[Dict[str, Any]] = []
     accumulated_citations: List[CitationRecord] = []
+    model = request.model or "fast-model"
+    started = time.monotonic()
 
     # 1. Build System Prompt
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
@@ -393,10 +444,21 @@ async def run_react_agent_stream(
             except TypeError:
                 raw_output = await call_llm(llm_messages, request.model or "fast-model", user_id)
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code in (401, 403, 429):
-                raise HTTPException(status_code=exc.response.status_code, detail="Inference gateway rejected the request") from exc
+            status_code = exc.response.status_code
+            _emit_agent_turn(
+                user_id, session.session_id, model, 1,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                extra={"error": "Inference gateway rejected the request", "http_status": status_code},
+            )
+            if status_code in (401, 403, 429):
+                raise HTTPException(status_code=status_code, detail="Inference gateway rejected the request") from exc
             raise HTTPException(status_code=502, detail="Inference gateway failed") from exc
         except (httpx.RequestError, OSError, ValueError, KeyError, IndexError) as exc:
+            _emit_agent_turn(
+                user_id, session.session_id, model, 1,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                extra={"error": "Inference gateway unavailable or returned an invalid response", "http_status": 502},
+            )
             raise HTTPException(status_code=502, detail="Inference gateway unavailable or returned an invalid response") from exc
 
         if cancel_event and cancel_event.is_set():
@@ -474,6 +536,11 @@ async def run_react_agent_stream(
                 cits_payload = [c.model_dump() for c in accumulated_citations]
                 yield f"data: {json.dumps({'chunk': approval_explanation, 'citations': cits_payload, 'approval_required': True, 'approval_id': appr_id, 'command': cmd})}\n\n"
                 yield "data: [DONE]\n\n"
+                _emit_agent_turn(
+                    user_id, session.session_id, model, 0,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    extra={"approval_required": True},
+                )
                 return
 
             # Check for security blockage
@@ -555,6 +622,11 @@ async def run_react_agent_stream(
         timestamp=time.time()
     ))
     await session_store.save_session(session)
+
+    _emit_agent_turn(
+        user_id, session.session_id, model, 0,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
 
     # 5. Terminal SSE event
     yield "data: [DONE]\n\n"

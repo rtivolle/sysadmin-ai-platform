@@ -88,11 +88,12 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
     // Unauthenticated probe used by the console to choose login vs console.
     if (pathname === '/api/admin/session' && req.method === 'GET') {
       const record = adminRecord(req)
-      return sendJson(res, 200, {
+      sendJson(res, 200, {
         authenticated: Boolean(record),
         user: record ? ADMIN_USER : null,
         gateway: { port: config.port, backendUrl: config.agentUrl },
       })
+      return true
     }
 
     if (pathname === '/api/admin/login' && req.method === 'POST') {
@@ -111,7 +112,7 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
       return true
     }
 
-    if (req.method === 'POST' && !requireMutation(req, res)) return true
+    if ((req.method === 'POST' || req.method === 'PATCH') && !requireMutation(req, res)) return true
 
     try {
       const handled = await route(req, res, url)
@@ -182,6 +183,12 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
 
     if (req.method === 'POST' && pathname === '/api/admin/local-models') {
       await proxyLocalModels(req, res, '/api/v1/models', 'POST')
+      return true
+    }
+
+    match = pathname.match(/^\/api\/admin\/local-models\/([A-Za-z0-9._-]+)$/)
+    if (req.method === 'PATCH' && match) {
+      await proxyLocalModels(req, res, `/api/v1/models/${encodeURIComponent(match[1])}`, 'PATCH')
       return true
     }
 
@@ -265,6 +272,7 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
     } catch (error) {
       sendJson(res, 500, { detail: `admin UI missing: ${error instanceof Error ? error.message : String(error)}` })
     }
+    return true
   }
 
   // ── Authentication ────────────────────────────────────────────────────────
@@ -753,7 +761,7 @@ export function createAdminConsole({ config, sessions, adminSessions, instances,
   async function proxyLocalModels(req, res, agentPath, method) {
     const token = masterToken()
     if (!token) return sendJson(res, 503, { detail: 'master key file unavailable' })
-    const needsBody = method === 'POST' && agentPath === '/api/v1/models'
+    const needsBody = method === 'PATCH' || (method === 'POST' && agentPath === '/api/v1/models')
     let body
     if (needsBody) {
       body = await readJsonBody(req, res)

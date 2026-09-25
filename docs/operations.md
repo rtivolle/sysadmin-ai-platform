@@ -13,8 +13,10 @@ single Linux host.
 - Optional: `ripgrep` (`/usr/bin/rg`) for faster log search; `systemd-run`;
   NVIDIA drivers and an upstream vLLM endpoint for real inference.
 
-The installer downloads native static binaries for Traefik, VictoriaLogs,
-SeaweedFS and Valkey (Valkey may be symlinked from Linuxbrew or `PATH`).
+The installer downloads native static binaries for Traefik, VictoriaLogs and
+SeaweedFS. Valkey is symlinked from `PATH` or a Linuxbrew prefix when present,
+otherwise fetched as a sha256-verified prebuilt binary from
+`download.valkey.io` (with `apt`/`apk` fallbacks) and placed in `backend/bin/`.
 
 ## 2. Install
 
@@ -183,12 +185,98 @@ Useful log locations:
 ```text
 backend/logs/{traefik,litellm,agent_tools,auth_gateway,inference,
               seaweedfs,valkey,victorialogs,audit_outbox}.log
+backend/logs/models/<model>.log                  # per-model vLLM/llama.cpp servers
 backend/data/victorialogs/outbox.jsonl          # pending audit replay
 backend/run/                                     # PID files and rendered config
 ```
+
+### Logging policy: full logging, always on
+
+Every Python service logs structured events continuously — there is no debug
+gate to enable. Each platform event is one JSON line on stderr/stdout, which
+`platform.sh` redirects to the per-service file above; uvicorn's
+server-lifecycle lines (startup/shutdown/errors) are interleaved in the same
+file. uvicorn's plain-text access lines are disabled — every HTTP request is
+logged as a JSON `request` event instead.
+
+```json
+{"ts": "2026-09-24T12:00:00.000Z", "service": "agent_tools", "level": "INFO",
+ "logger": "agent_tools.requests", "event": "request", "message": "request",
+ "fields": {"method": "POST", "path": "/api/tools/execute", "status": 200,
+            "duration_ms": 12.34}}
+```
+
+Covered surfaces: an ASGI middleware logs every HTTP request (method, path,
+status, duration) on the agent platform, auth gateway and inference engine;
+service startup events; approval-gate lifecycle (propose/block/decide/claim/
+complete); model-manager lifecycle (register/download/start/stop/restart/
+delete, with rejection reasons and durations); and the audit outbox worker.
+Inference completions are additionally recorded by LiteLLM's logging callback
+(user, tokens, error type) and in the per-model vLLM logs. The VictoriaLogs
+audit trail is a separate, schema-conformant stream (see
+[security.md](security.md)); server logs complement it and are not a substitute.
+
+**Redaction policy (never relaxed):** authorization headers, bearer tokens,
+keys and passwords are never written to any log; request bodies, query strings,
+prompts and completion content are never logged — only bounded scalar fields
+(counts, identifiers, durations, hashes). Secrets live only in
+`backend/config/keys/`.
+
+Deliberate exclusions: `target_executor/main.py` (a standalone, stdlib-only
+privileged file copied to `/usr/local/libexec`; its executions are audited by
+the adapter), the observability collector (its stdout *is* its Prometheus
+output contract), and the harness JS gateway (another lane's active surface).
 
 ## 8. Shutdown and data
 
 `./platform.sh stop` stops services but keeps data. Runtime state is under
 `backend/data/` (Valkey, VictoriaLogs, SeaweedFS, workspaces) and is Git-ignored.
 For backup/restore see [backup-restore.md](backup-restore.md).
+
+## 9. Scheduled backup and audit anchoring
+
+A systemd **user** timer is the recommended way to run backups and audit
+anchoring on a schedule without a privileged system unit. The snippet below is
+illustrative — adapt paths, the off-host mount and the retention policy (still
+pending the data owner's decision) and do **not** install it without review.
+
+```systemd
+# ~/.config/systemd/user/backup.service
+[Unit]
+Description=Platform backup + off-host copy + audit anchor
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Run from the checkout so the anchor dir stays outside the repository.
+WorkingDirectory=%h/Work/Mila/Plateforme IA Sysadmin - Documentation Complète des Services
+ExecStart=%h/.../backend/.venv/bin/python3 -m backend.services.resilience.audit_anchor seal \
+    --anchor-dir /mnt/worm-anchor --grace-seconds 900
+# Off-host copy is triggered from the backup entrypoint (see below), or by a
+# small wrapper that calls create_backup(offhost_dest=..., offhost_retention_days=...).
+```
+
+```systemd
+# ~/.config/systemd/user/backup.timer
+[Unit]
+Description=Run platform backup hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now backup.timer
+systemctl --user list-timers backup.timer
+```
+
+Record the anchor tip hash that `verify` prints in independent monitoring so a
+tail-truncated ledger is detectable against an externally recorded value; put
+`AUDIT_ANCHOR_DIR` and `OFFHOST_BACKUP_DEST` on WORM/append-only storage with
+separate credentials (see [backup-restore.md](backup-restore.md) §4–§5).

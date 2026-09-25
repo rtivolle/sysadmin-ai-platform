@@ -19,6 +19,7 @@ RUN_DIR="${ROOT_DIR}/run"
 SERVICES_DIR="${ROOT_DIR}/services"
 VENV_PYTHON="${ROOT_DIR}/.venv/bin/python3"
 VENV_LITELLM="${ROOT_DIR}/.venv/bin/litellm"
+VLLM_VENV_DIR="${VLLM_VENV_DIR:-${ROOT_DIR}/.vllm-venv}"
 HARNESS_DIR="${ROOT_DIR}/../packages/harness-integration"
 
 # The agent platform defaults to 3080. On a host where the DeepSeek Harness web
@@ -29,6 +30,80 @@ AGENT_PORT="${SYSADMIN_AGENT_PORT:-3080}"
 HARNESS_STATE_DIR="${DATA_DIR}/harness"
 
 mkdir -p "$LOGS_DIR" "$RUN_DIR" "$DATA_DIR/valkey" "$DATA_DIR/seaweedfs" "$DATA_DIR/victorialogs"
+
+# ---- Multi-host deployment role (PR-H1) -------------------------------------
+# backend/config/roles/deployment.env (git-ignored) is the only way this host
+# stops being the single-host `all` role. Absent file => `all` => exactly
+# today's behaviour. See docs/multi-host.md.
+DEPLOYMENT_ENV="${CONFIG_DIR}/roles/deployment.env"
+# Environment may pre-set ROLE (tests/CI); deployment.env wins when present.
+ROLE="${ROLE:-all}"
+if [ -f "$DEPLOYMENT_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  # shellcheck source=/dev/null
+  . "$DEPLOYMENT_ENV"
+  set +a
+fi
+ROLE="${ROLE:-all}"
+
+# Outward-facing bind address: loopback for single-host `all`, the machine's
+# LAN address otherwise. Traefik keeps binding every interface (front door) and
+# is restricted by backend/config/firewall/web.nft instead.
+LAN_BIND_IP="${LAN_BIND_IP:-127.0.0.1}"
+if [ "$ROLE" = "all" ]; then
+  LAN_BIND_IP="127.0.0.1"
+fi
+
+# Peer addresses used to build VALKEY_URL / VICTORIALOGS_URL / LITELLM_URL.
+PEER_INFERENCE_HOST="${PEER_INFERENCE_HOST:-127.0.0.1}"
+PEER_INFERENCE_PORT="${PEER_INFERENCE_PORT:-4000}"
+PEER_DATA_HOST="${PEER_DATA_HOST:-127.0.0.1}"
+PEER_DATA_VALKEY_PORT="${PEER_DATA_VALKEY_PORT:-6379}"
+PEER_DATA_LOGS_PORT="${PEER_DATA_LOGS_PORT:-9428}"
+PEER_DATA_SEAWEEDFS_PORT="${PEER_DATA_SEAWEEDFS_PORT:-8333}"
+
+# Canonical start order (dependencies first); role filtering selects a subset.
+# harness_gateway is intentionally absent: it is opt-in via `platform.sh harness`.
+SERVICE_START_ORDER="valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik"
+
+# Services this host's role owns (shown in status, stopped on stop).
+role_services() {
+  case "$ROLE" in
+    all)        echo "valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik harness_gateway" ;;
+    web)        echo "auth_gateway agent_tools audit_outbox traefik harness_gateway" ;;
+    inference)  echo "litellm inference audit_outbox" ;;
+    data)       echo "valkey victorialogs seaweedfs" ;;
+    *)
+      echo "Unknown role: ${ROLE} (expected all|web|inference|data)" >&2
+      return 1
+      ;;
+  esac
+}
+
+role_owns() {
+  local svc list
+  list="$(role_services)" || return 1
+  for svc in $list; do
+    [ "$svc" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# Export peer URLs that need no secret (safe to set for every command).
+export_peer_urls() {
+  export VICTORIALOGS_URL LITELLM_URL SYSADMIN_LITELLM_URL
+  VICTORIALOGS_URL="http://${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
+  LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
+  SYSADMIN_LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
+}
+export_peer_urls
+
+# Prefer the installer's isolated vLLM environment when present. Keep an
+# explicit operator override intact.
+if [ -z "${VLLM_BIN:-}" ] && [ -x "${VLLM_VENV_DIR}/bin/vllm" ]; then
+  export VLLM_BIN="${VLLM_VENV_DIR}/bin/vllm"
+fi
 
 SERVICE_NAMES="valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik harness_gateway"
 
@@ -128,7 +203,9 @@ load_secrets() {
   LITELLM_MASTER_KEY="$(cat "$master_key_file")"
   export VALKEY_PASSWORD VALKEY_URL
   VALKEY_PASSWORD="$(cat "$valkey_password_file")"
-  VALKEY_URL="redis://:${VALKEY_PASSWORD}@127.0.0.1:6379/0"
+  # Valkey lives on the data peer (loopback for `all`); the password still
+  # comes from this machine's key file (see docs/multi-host.md §key-copy).
+  VALKEY_URL="redis://:${VALKEY_PASSWORD}@${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}/0"
   VALKEY_CONFIG_SOURCE="${CONFIG_DIR}/valkey/valkey.conf" VALKEY_CONFIG_RUNTIME="${RUN_DIR}/valkey.conf" \
     "$VENV_PYTHON" -c 'import os, pathlib; src = pathlib.Path(os.environ["VALKEY_CONFIG_SOURCE"]); dst = pathlib.Path(os.environ["VALKEY_CONFIG_RUNTIME"]); dst.write_text(src.read_text().replace("CONFIGURE_VIA_PLATFORM_SH", os.environ["VALKEY_PASSWORD"])); dst.chmod(0o600)'
 }
@@ -143,7 +220,7 @@ start_one() {
       start_service "victorialogs" "${BIN_DIR}/victoria-logs-prod" \
         "-storageDataPath=${DATA_DIR}/victorialogs" \
         "-retentionPeriod=90d" \
-        "-httpListenAddr=127.0.0.1:9428"
+        "-httpListenAddr=${LAN_BIND_IP}:9428"
       ;;
     audit_outbox)
       start_service "audit_outbox" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/agent_tools/audit.py" "--worker"
@@ -151,8 +228,8 @@ start_one() {
     seaweedfs)
       start_service "seaweedfs" "${BIN_DIR}/weed" "server" \
         "-dir=${DATA_DIR}/seaweedfs" \
-        "-ip=127.0.0.1" \
-        "-ip.bind=127.0.0.1" \
+        "-ip=${LAN_BIND_IP}" \
+        "-ip.bind=${LAN_BIND_IP}" \
         "-master.peers=none" \
         "-s3" \
         "-s3.port=8333" \
@@ -173,7 +250,7 @@ start_one() {
       start_service "litellm" "$VENV_LITELLM" \
         "--config" "${CONFIG_DIR}/litellm/config.yaml" \
         "--port" "4000" \
-        "--host" "127.0.0.1" \
+        "--host" "${LAN_BIND_IP}" \
         "--num_workers" "2"
       ;;
     traefik)
@@ -248,63 +325,41 @@ start_all() {
   load_secrets
 
   echo "=========================================================="
-  echo " Starting Sysadmin AI Platform Backend (Zero-Docker Stack)"
+  echo " Starting Sysadmin AI Platform Backend (role: ${ROLE})"
   echo "=========================================================="
 
-  # 1. Valkey (Fast memory & state store)
-  start_one valkey
-  # 2. VictoriaLogs (Forensic audit logs database)
-  start_one victorialogs
-  # Replay audit events buffered while VictoriaLogs was unavailable.
-  start_one audit_outbox
-  # 3. SeaweedFS (Local S3 object storage & filer)
-  start_one seaweedfs
-  # 4. Inference Engine (Local mock / upstream vLLM router)
-  start_one inference
-  # 5. Auth Gateway (Traefik ForwardAuth adapter)
-  start_one auth_gateway
-  # 6. Agent Tools Platform (Sandboxed tools, approval gate & audit)
-  start_one agent_tools
-  # 7. LiteLLM Proxy (Token quotas, rate limits, virtual keys)
-  start_one litellm
-  # 8. Traefik Reverse Proxy (TLS termination & routing)
-  start_one traefik
+  local svc
+  for svc in $SERVICE_START_ORDER; do
+    role_owns "$svc" || continue
+    start_one "$svc"
+  done
 
   echo "=========================================================="
-  echo " All services launched. Run './platform.sh status' to inspect."
+  echo " Role '${ROLE}' services launched. Run './platform.sh status'."
   echo "=========================================================="
 }
 
 stop_all() {
-  echo "Stopping all Sysadmin AI Platform services..."
-  # The harness gateway owns per-user dsh children; stop it before their backend
-  # and reap the instances it left running for re-adoption.
-  stop_service "harness_gateway"
-  reap_harness_instances
-  stop_service "traefik"
-  stop_service "litellm"
-  stop_service "agent_tools"
-  stop_service "auth_gateway"
-  stop_service "inference"
-  stop_service "seaweedfs"
-  stop_service "audit_outbox"
-  stop_service "victorialogs"
-  stop_service "valkey"
-  echo "All services stopped."
+  echo "Stopping Sysadmin AI Platform services (role: ${ROLE})..."
+  # Reverse start order. On web/all the harness gateway is stopped first and
+  # its per-user children reaped from the registry; on other roles these are
+  # no-ops.
+  local svc
+  for svc in harness_gateway traefik litellm agent_tools auth_gateway inference seaweedfs audit_outbox victorialogs valkey; do
+    role_owns "$svc" || continue
+    stop_service "$svc"
+    [ "$svc" = "harness_gateway" ] && reap_harness_instances
+  done
+  echo "All '${ROLE}' services stopped."
 }
 
 show_status() {
-  echo "=== Sysadmin AI Platform Service Status ==="
-  status_one traefik
-  status_one litellm
-  status_one agent_tools
-  status_one auth_gateway
-  status_one inference
-  status_one seaweedfs
-  status_one audit_outbox
-  status_one victorialogs
-  status_one valkey
-  status_one harness_gateway
+  echo "=== Sysadmin AI Platform Service Status (role: ${ROLE}) ==="
+  local svc
+  for svc in traefik litellm agent_tools auth_gateway inference seaweedfs audit_outbox victorialogs valkey harness_gateway; do
+    role_owns "$svc" || continue
+    status_one "$svc"
+  done
   echo "==========================================="
 }
 

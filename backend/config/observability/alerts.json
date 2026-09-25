@@ -1,0 +1,108 @@
+{
+  "$schema-note": "Alert rules for backend/services/observability/alerts.py. op is one of lt|le|gt|ge|eq|ne. labels values of '*' expand the rule per distinct label value. owner is a role placeholder until an on-call roster is assigned.",
+  "rules": [
+    {
+      "name": "service_down",
+      "metric": "observability_service_up",
+      "labels": {"service": "*"},
+      "op": "lt",
+      "threshold": 1,
+      "for_seconds": 60,
+      "severity": "critical",
+      "owner": "owner-pending",
+      "runbook": "service_down.md",
+      "summary": "Service {{service}} is down"
+    },
+    {
+      "name": "outbox_backlog",
+      "metric": "observability_outbox_backlog",
+      "op": "gt",
+      "threshold": 100,
+      "for_seconds": 300,
+      "severity": "warning",
+      "owner": "owner-pending",
+      "runbook": "outbox_backlog.md",
+      "summary": "Audit outbox backlog at {{value}} events"
+    },
+    {
+      "name": "outbox_age",
+      "metric": "observability_outbox_oldest_age_seconds",
+      "op": "gt",
+      "threshold": 3600,
+      "for_seconds": 300,
+      "severity": "warning",
+      "owner": "owner-pending",
+      "runbook": "outbox_age.md",
+      "summary": "Oldest outbox event is {{value}}s old"
+    },
+    {
+      "name": "backup_age",
+      "metric": "observability_backup_newest_age_seconds",
+      "op": "gt",
+      "threshold": 93600,
+      "for_seconds": 3600,
+      "severity": "critical",
+      "owner": "owner-pending",
+      "runbook": "backup_age.md",
+      "summary": "Newest backup is {{value}}s old (limit 26h)"
+    },
+    {
+      "name": "disk_usage",
+      "metric": "observability_disk_used_percent",
+      "op": "gt",
+      "threshold": 85,
+      "for_seconds": 300,
+      "severity": "critical",
+      "owner": "owner-pending",
+      "runbook": "disk_usage.md",
+      "summary": "Disk usage at {{value}}% (limit 85%)"
+    },
+    {
+      "name": "ram_usage",
+      "metric": "observability_ram_used_percent",
+      "op": "gt",
+      "threshold": 90,
+      "for_seconds": 300,
+      "severity": "critical",
+      "owner": "owner-pending",
+      "runbook": "ram_usage.md",
+      "summary": "RAM usage at {{value}}% (limit 90%)"
+    },
+    {
+      "name": "stale_leases",
+      "metric": "observability_stale_leases_total",
+      "op": "gt",
+      "threshold": 0,
+      "for_seconds": 300,
+      "severity": "warning",
+      "owner": "owner-pending",
+      "runbook": "stale_leases.md",
+      "summary": "{{value}} expired quota lease entries still resident in Valkey"
+    },
+    {
+      "name": "gpu_memory",
+      "metric": "observability_gpu_memory_used_percent",
+      "labels": {"gpu": "*"},
+      "op": "gt",
+      "threshold": 90,
+      "for_seconds": 300,
+      "severity": "warning",
+      "owner": "owner-pending",
+      "runbook": "gpu_memory.md",
+      "summary": "GPU {{gpu}} VRAM at {{value}}% (limit 90%)"
+    },
+    {
+      "name": "quota_reject_spike",
+      "metric": "observability_quota_rejects_total",
+      "op": "gt",
+      "threshold": 100,
+      "for_seconds": 300,
+      "severity": "warning",
+      "owner": "owner-pending",
+      "runbook": "quota_reject_spike.md",
+      "summary": "Quota rejects spiked to {{value}}",
+      "enabled": false,
+      "note": "Not yet measurable from outside: the auth gateway does not currently expose a reject counter on any loopback endpoint. Enabling this rule requires a read-only reject-count metric from the auth gateway or LiteLLM custom auth; the collector will emit observability_quota_rejects_total once that source exists."
+    }
+  ]
+}

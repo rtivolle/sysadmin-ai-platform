@@ -16,10 +16,12 @@ admin-only and lives in `backend/services/model_manager/`.
 
 ## 1. Prerequisites
 
-- **vLLM** on the GPU host, pinned to a build that matches the driver/CUDA and
-  PyTorch versions. It is intentionally **not** installed by `install.sh` — see
-  the [vLLM installation guide](https://docs.vllm.ai/en/stable/getting_started/installation/).
-  Set `VLLM_BIN` if the binary is not on `PATH`.
+- **vLLM** is installed by `install.sh` on `all` and `inference` roles in the
+  isolated `backend/.vllm-venv` environment using vLLM's automatic PyTorch
+  backend selection. This is a large GPU-specific download; the host still
+  needs a supported Linux/Python/GPU/driver stack. See the [vLLM installation
+  guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) for
+  platform requirements. Set `VLLM_BIN` to override the installed executable.
 - **llama.cpp** on the GPU host for GGUF models. Install/build `llama-server`
   for that host; it is not installed by `install.sh`. Set `LLAMACPP_BIN` if it
   is not on `PATH`. CUDA runtime libraries must be reachable in the child
@@ -32,6 +34,10 @@ admin-only and lives in `backend/services/model_manager/`.
 - For air-gapped/mirrored hubs set `HF_ENDPOINT` and/or `HF_HUB_OFFLINE`.
 
 ## 2. Lifecycle
+
+For native GPU installation and the full vLLM YAML configuration, see
+[NVIDIA and vLLM setup](nvidia-vllm.md). Driver installation is opt-in;
+`./install.sh --nvidia` prints a plan without installing anything.
 
 ```text
 register  ->  download      ->  start (selected engine)  ->  running  ->  selectable
@@ -66,7 +72,8 @@ All endpoints require the `admin` role (the master key). A normal user gets
 |---|---|---|
 | GET | `/api/v1/models` | List registered models with status and server info. |
 | GET | `/api/v1/models/{name}` | One model plus download-job status. |
-| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, engine?}`. `engine="llamacpp"` additionally requires `gguf_file` (basename ending `.gguf`); optional `ctx_size` (512–131072, default 2048), `n_gpu_layers` (`"all"` or non-negative integer, default `"all"`), and `flash_attn` (boolean, default `true`). vLLM parameters remain unchanged. |
+| POST | `/api/v1/models` | Register `{hf_repo\|reference, name?, revision?, engine?}`. `engine="llamacpp"` additionally requires `gguf_file` (basename ending `.gguf`); optional `ctx_size` (512–131072, default 2048), `n_gpu_layers` (`"all"` or non-negative integer, default `"all"`), and `flash_attn` (boolean, default `true`). |
+| PATCH | `/api/v1/models/{name}` | Update loading parameters of an inactive model (refused with `409` while starting, downloading or running). Accepts only the engine's loading fields; `null` clears a field so the engine default applies at next start. |
 | POST | `/api/v1/models/{name}/download` | Start a background snapshot download (`202`). |
 | POST | `/api/v1/models/{name}/start` | Start the configured engine (`202`; poll the model). |
 | POST | `/api/v1/models/{name}/stop` | Stop the configured engine and refresh LiteLLM. |
@@ -74,8 +81,39 @@ All endpoints require the `admin` role (the master key). A normal user gets
 | GET | `/api/v1/models/{name}/logs?tail=` | Tail the selected engine log (1 KiB–256 KiB). |
 | DELETE | `/api/v1/models/{name}?delete_files=0\|1` | Unregister (and optionally delete files); refused while running. |
 
-Mutations emit `model_register`, `model_download`, `model_start`, `model_stop`
-and `model_delete` audit events (see
+### 3.1 Loading parameters
+
+Loading parameters are chosen at registration and adjustable afterwards with
+`PATCH`. The accepted sets are closed; unknown or immutable fields (name,
+`hf_repo`, `revision`, `engine`, `gguf_file`, `path`) are rejected with `400`.
+
+| Engine | Field | Type / bounds | Engine flag |
+|---|---|---|---|
+| vLLM | `quantization` | string (e.g. `awq`, `gptq`, `fp8`) | `--quantization` |
+| vLLM | `max_model_len` | integer ≥ 1 | `--max-model-len` |
+| vLLM | `tensor_parallel_size` | integer ≥ 1 | `--tensor-parallel-size` |
+| vLLM | `gpu_memory_utilization` | float in (0, 1] | `--gpu-memory-utilization` |
+| vLLM | `max_num_seqs` | integer ≥ 1 | `--max-num-seqs` |
+| vLLM | `dtype` | `auto`/`half`/`float16`/`bfloat16`/`float`/`float32` | `--dtype` |
+| vLLM | `kv_cache_dtype` | `auto`/`fp8`/`fp8_e5m2`/`fp8_e4m3`/`fp8_inc`/`fp8_ds` | `--kv-cache-dtype` |
+| vLLM | `enforce_eager` | boolean | `--enforce-eager`/`--no-enforce-eager` |
+| vLLM | `enable_prefix_caching` | boolean | `--enable-prefix-caching`/`--no-enable-prefix-caching` |
+| llama.cpp | `ctx_size` | integer 512–131072 | `--ctx-size` |
+| llama.cpp | `n_gpu_layers` | `"all"` or integer ≥ 0 | `--n-gpu-layers` |
+| llama.cpp | `flash_attn` | boolean | `--flash-attn on\|off` |
+| llama.cpp | `threads` | integer ≥ 1 | `--threads` |
+| llama.cpp | `batch_size` | integer ≥ 1 | `--batch-size` |
+| llama.cpp | `mmap` | boolean (default `true`) | `--no-mmap` when false |
+| llama.cpp | `mlock` | boolean (default `false`) | `--mlock` when true |
+
+vLLM registration values override the operator `VLLM_CONFIG` file (see
+[nvidia-vllm.md](nvidia-vllm.md)); an absent field inherits the file or the
+vLLM default. Explicit booleans override in both directions. An absent llama.cpp
+field falls back to its API default. Changes only take effect on the next start
+of the model.
+
+Mutations emit `model_register`, `model_update`, `model_download`, `model_start`,
+`model_stop` and `model_delete` audit events (see
 [status/AUDIT_CENSUS.md](status/AUDIT_CENSUS.md)).
 
 ## 4. How a model becomes "available"
@@ -86,7 +124,9 @@ and `model_delete` audit events (see
   model returns `503`, not a simulated answer. For llama.cpp, routing liveness
   validates the recorded PID's `/proc` command line; HTTP health is used during
   startup readiness, not on every chat request. A transient health miss never
-  signals the model process.
+  signals the model process. If process shutdown cannot be confirmed, the
+  manager marks it `error` but retains PID/port ownership for an explicit stop
+  retry; it does not auto-reap on subsequent reads.
 - **LiteLLM** gets a managed `model_list` entry per running model, tagged
   `model_info.managed_by: sysadmin-model-manager`. Hand-written entries such as
   `fast-model`/`heavy-model` are never touched. Because this deployment runs
@@ -103,7 +143,10 @@ and `model_delete` audit events (see
 | `backend/config/keys/hf-token.key` | Optional HuggingFace token (0600). |
 | `MODELS_DIR` / `MODELS_REGISTRY` | Override the store / registry path. |
 | `HF_TOKEN` / `HF_ENDPOINT` / `HF_HOME` / `HF_HUB_OFFLINE` | Hub auth, mirror, cache, offline. |
-| `VLLM_BIN` | vLLM executable (default `vllm` on `PATH`). |
+| `VLLM_BIN` | vLLM executable (platform defaults to the installed `.vllm-venv` binary, then `PATH`). |
+| `VLLM_VENV_DIR` | Installer/platform vLLM environment (default `backend/.vllm-venv`). |
+| `VLLM_CONFIG` | Operator-owned native YAML; defaults to `backend/config/vllm/serve.yaml`. Empty disables the file. |
+| `VLLM_VERSION` | Optional exact installer version; also `--vllm-version VERSION`. |
 | `MODEL_PORT_START` / `MODEL_PORT_END` | vLLM port range (default 8100–8199). |
 | `MODEL_LOG_DIR` | vLLM log directory. |
 | `LITELLM_CONFIG` | LiteLLM config path to manage. |

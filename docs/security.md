@@ -159,6 +159,113 @@ as untrusted data.
 > host service. A production deployment needs a separate least-privilege
 > execution path and a clean staging target validation.
 
+### Target adapter privilege model
+
+This section describes the least-privilege privileged boundary implemented for
+PR-A1. It is **implemented and unit/concurrency-tested**, but has not yet been
+qualified on a production host (that is PR-A2).
+
+#### Executor identity
+
+The privileged component is a single standalone program,
+`sysadmin-target-exec`, installed root-owned at
+`/usr/local/libexec/sysadmin-target-exec` (mode `0755 root:root`). It is
+standard-library-only and imports nothing from the repository, so it runs with
+a clean environment and no repository code. It is the **only** component of the
+platform ever invoked with privilege.
+
+#### Privilege acquisition paths
+
+There is exactly **one** path from the unprivileged agent to root:
+
+1. The adapter runs as the dedicated, unprivileged `sysadmin-agent` account
+   (systemd unit hardened with `NoNewPrivileges`, an empty capability set, and
+   `ProtectSystem=strict`; see
+   `backend/config/target_executor/SYSTEMD_HARDENING.md`).
+2. That account may run, and only run, the executor:
+   `sudo -n /usr/local/libexec/sysadmin-target-exec <verb> <args>`.
+   The sudoers entry (`/etc/sudoers.d/sysadmin-target-exec`) grants NOPASSWD on
+   exactly that executable, with **no argument wildcards** and **no SETENV**.
+3. The executor re-validates the request against its own root-owned allowlist
+   (`/etc/sysadmin-target-exec/allowlist.json`, mode `0644 root:root`, refused
+   if it is a symlink or group/world writable) and only then performs the side
+   effect.
+
+The fixed verb set is `service-restart|service-reload|service-status <unit>`,
+`config-install <staged-file> <dest> <sha256>`, and
+`config-rollback <backup> <dest>`. The executor rejects before any side effect:
+unknown verbs, extra/missing arguments, non-allow-listed units, destinations
+outside the allowlist, a symlink anywhere in the destination path, a symlinked
+or non-regular or group/world-writable or wrong-owner/mode staged file, a
+staged file outside the staging dir, and a staged-file sha256 that does not
+match the (approval-bound) hash argument. `config-install` is atomic (write a
+temp file in the destination directory, `fsync`, rename), keeps a byte-for-byte
+backup of the previous file, and applies the mode/owner policy from the
+allowlist.
+
+#### Why minimal
+
+- **One executable, one environment.** sudo's default `env_reset` (no `SETENV`)
+  strips the caller's environment, so a compromised adapter cannot smuggle the
+  test-only `TARGET_EXEC_ALLOWLIST_PATH`/`TARGET_EXEC_SYSTEMCTL` overrides into
+  the root executor.
+- **No argument wildcards in sudo.** sudo matches arguments with `fnmatch` on
+  the raw command line; a wildcard would let a compromised adapter pass any
+  arguments. Instead the single fixed executable is allowed and the executor
+  enforces the exact allowlist itself — the allowlist is the single, root-owned
+  source of truth, and the adapter's own allowlists
+  (`target_adapter/config.py`) are only a fail-fast layer.
+- **The allowlist is enforced in the privileged component**, not only in the
+  unprivileged caller, so a bug in the adapter cannot widen the blast radius.
+
+#### What an adapter compromise can and cannot do
+
+The executor is a **scope** boundary, not an **authorization** boundary. Human
+approval is enforced upstream by the approval gate *before* the executor is
+invoked; the executor cannot see the approval record and does not re-check it.
+
+An attacker who fully compromises the `sysadmin-agent` account **can**:
+
+- install arbitrary content (any bytes) under the allow-listed destinations
+  (e.g. `/etc/nginx`, `/etc/traefik`, `/etc/systemd/system`), because they
+  control both the staged file and the sha256 argument the executor checks;
+- restart, reload, and query the status of the allow-listed units;
+- write only into the staging directory.
+
+An attacker who fully compromises `sysadmin-agent` **cannot**:
+
+- write anywhere outside the allow-listed destinations or staging dir;
+- touch any unit not in the allowlist;
+- modify the allowlist (root-owned, not group/world writable) or the executor
+  binary (root-owned `0755`);
+- run any program other than the executor with its fixed verb set — no shell,
+  no arbitrary command;
+- read host files the account cannot already read.
+
+#### Residual risks
+
+- **Scope, not authorization.** Because the executor trusts the sha256 argument
+  supplied by the adapter, a *malicious* adapter installs arbitrary content
+  within the allowlist. The sha256 check defends against a *third party*
+  tampering with the staging dir between staging and execution, and against an
+  honest adapter bug — not against the adapter itself. The approval gate remains
+  the only authorization boundary, and it is bypassed by adapter compromise.
+- **Base-hash TOCTOU.** The executor does not verify the base hash; the
+  adapter's conflict detection reads the destination before delegating, so a
+  concurrent external write between that read and the executor's rename is not
+  detected by the executor.
+- **sudo NOPASSWD.** A passwordless sudoers entry means the allowlist is the
+  entire privilege a stolen `sysadmin-agent` account gains; keep the allowlist
+  as narrow as possible and treat its contents as production targets.
+- **`test_hooks` must stay `false`.** A production allowlist that sets
+  `test_hooks: true` would let `TARGET_EXEC_SYSTEMCTL` redirect the privileged
+  `systemctl` invocation; the example allowlist ships with `test_hooks: false`.
+- **Backups accumulate.** Each `config-install` over an existing file leaves a
+  `.bak.*` file in the destination directory; rotation/cleanup is not automated.
+- **Not yet host-qualified.** The above is verified by unit and concurrency
+  tests with a fake `systemctl`; the real sudo → root path has not been run on a
+  production host (PR-A2).
+
 ## 7. Audit
 
 - Structured events carry `event_id`, UTC timestamp, service, user/session,

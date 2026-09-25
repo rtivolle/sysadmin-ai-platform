@@ -29,8 +29,11 @@ from services.model_manager.router import router as model_manager_router
 from services.agent_runtime.workspace import ensure_workspace
 from services.auth_gateway.server import authenticate_request, role_for_user
 from services.hardware_survey import run_hardware_survey
+from services.logging_setup import RequestLoggingMiddleware, configure, get_logger, log_event
 
 app = FastAPI(title="Sysadmin Agent Platform API", version="1.0.0")
+app.add_middleware(RequestLoggingMiddleware, service="agent_tools")
+_LOG = get_logger("agent_tools.server")
 
 @app.exception_handler(ConnectionError)
 async def approval_store_unavailable(_request: Request, _exc: ConnectionError):
@@ -247,5 +250,8 @@ async def decide_approval_endpoint(request: Request):
     return res
 
 if __name__ == "__main__":
+    configure("agent_tools")
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 3080
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    log_event(_LOG, "service_start", f"agent platform listening on 127.0.0.1:{port}",
+              fields={"port": port, "host": "127.0.0.1"})
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", access_log=False)  # requests are logged as JSON by the middleware

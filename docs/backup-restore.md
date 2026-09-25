@@ -82,7 +82,72 @@ It returns `success`, `rpo{}`, `rto{}`, `sequence_verification{}`,
 backend/.venv/bin/python3 -m pytest backend/tests/tier4_recovery -q
 ```
 
-## 4. Honest limitations
+## 4. Audit anchor (tamper-evident integrity)
+
+`backend/services/resilience/audit_anchor.py` seals fixed time windows of the
+`service:dsh-agent` VictoriaLogs stream into a hash-chained JSONL ledger meant
+to live on independently controlled storage:
+
+```text
+batch_hash = sha256(prev_hash || window || count || sha256(canonical events))
+```
+
+* **`seal`** queries VictoriaLogs (`VICTORIALOGS_URL`, default
+  `http://127.0.0.1:9428`, `/select/logsql/query`) for `service:="dsh-agent"`
+  events in fixed windows (default 1 h). Only windows that are fully in the past
+  plus a grace delay (default 15 min, for outbox lag) are sealed. Events are
+  canonicalized (keys sorted, VictoriaLogs-internal `_stream`/`_stream_id`/
+  `_msg`/`_time` dropped), deduplicated by `event_id`, and sorted by `event_id`. Each
+  batch appends `{index, window_start, window_end, count, events_sha256,
+  prev_hash, hash}` to `AUDIT_ANCHOR_DIR/audit_anchor_ledger.jsonl` (`0600`,
+  `O_APPEND`). It is idempotent and fail-closed: an unreachable store leaves the
+  ledger untouched and exits non-zero. By default the anchor directory must live
+  outside the repository (independently controlled storage); `--allow-local`
+  exists only for tests.
+* **`verify`** re-queries every sealed window and recomputes the chain, naming
+  the exact failing batch and reason (event added / removed / modified, chain
+  broken, ledger truncated or edited). `--ledger-only` skips re-querying the
+  store; `--expect-tip`/`--expect-min-index` detect tail truncation against an
+  externally recorded tip hash.
+
+Run it:
+
+```bash
+backend/.venv/bin/python3 -m backend.services.resilience.audit_anchor seal \
+    --anchor-dir /mnt/worm-anchor
+backend/.venv/bin/python3 -m backend.services.resilience.audit_anchor verify \
+    --anchor-dir /mnt/worm-anchor
+```
+
+**Honest property: the anchor is tamper-EVIDENT, not immutable.** Any interior
+edit breaks the chain, but an attacker who can rewrite the *whole* ledger *and*
+the store can recompute a self-consistent one. Immutability depends entirely on
+the anchor storage policy: put `AUDIT_ANCHOR_DIR` on a WORM/append-only
+filesystem with separate credentials (`chattr +a` plus a dedicated host account
+is the cheap local approximation), and record the tip hash printed by `verify`
+in independent monitoring.
+
+## 5. Off-host backup copies
+
+After `create_backup` produces a local archive, it can be pushed to
+independently controlled storage (`OFFHOST_BACKUP_DEST`):
+
+* **Local mount** — `OFFHOST_BACKUP_DEST=/mnt/worm-backups` (the required form
+  for production). The archive, manifest and a `<archive>.sha256` sidecar are
+  copied and then **re-read from the destination and re-hashed** to verify the
+  copy.
+* **`ssh://`** — `OFFHOST_BACKUP_DEST=ssh://user@host:/path` (optional) copies
+  via `rsync -a` and verifies by pulling the archive back and re-hashing it.
+
+`create_backup(offhost_dest=..., offhost_retention_days=...)` records the copy
+in the manifest and prunes archives older than the retention (default 90 days —
+a configurable placeholder **pending the data owner's retention decision**).
+`RestoreManager.restore_from_offhost(offhost_dest, backup_id)` pulls the archive
+from off-host storage, verifies its SHA-256 against the sidecar, and only then
+restores. Every copy/checksum/prune failure raises `OffhostBackupError` — there
+is no silent, best-effort path.
+
+## 6. Honest limitations
 
 - **RPO/RTO**: the file-copy restore phase is measured (2026-09-24,
   `backend/tests/qualification/restore_drill.py --real`): 2.4 MB / 823 paths of
@@ -92,12 +157,17 @@ backend/.venv/bin/python3 -m pytest backend/tests/tier4_recovery -q
   end-to-end RTO under four hours is supported, not fully measured. Production-
   sized data and off-host copies remain operator responsibilities.
 - **Single point of failure.** One host; backups are not high availability.
-- **No independent integrity archive.** The design calls for hashes anchored to
-  separately controlled storage; that is not implemented.
-- **Retention** is a VictoriaLogs setting (90 days), not a legal retention
-  policy. The data owner must approve retention.
-- **Off-host copies** are the operator's responsibility; the built-in backup
-  writes to a local directory.
+- **Tamper-evidence, not immutability.** The audit anchor (§4) and off-host
+  SHA-256 sidecars (§5) detect tampering; they do not prevent it. Immutability
+  requires WORM/append-only anchor storage with separate credentials, and
+  off-host storage the platform host cannot write to.
+- **Retention** is a VictoriaLogs setting (90 days) and a configurable off-host
+  placeholder (90 days), not a legal retention policy. The data owner must
+  approve retention.
+- **Off-host copies** are only verified for integrity, not for restorability
+  *until* a `restore_from_offhost` is actually run; rehearse it on a disposable
+  host. `ssh://` retention pruning is deliberately left to the operator rather
+  than guessed at.
 - **Post-restore service bring-up** from restored state is still outstanding:
   the 2026-09-24 drill verified file-level restore, integrity and permission
   contracts against real host state, not service start from restored state. The

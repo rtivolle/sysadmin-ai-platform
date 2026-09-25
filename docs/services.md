@@ -245,16 +245,18 @@ engine and LiteLLM.
 
 | File | Responsibility |
 |---|---|
-| `registry.py` | Validated JSON registry (`backend/data/models/registry.json`, 0600, atomic writes); name/repo/revision validation; path confinement. |
+| `registry.py` | Validated JSON registry (`backend/data/models/registry.json`, 0600, atomic writes); name/repo/revision/engine validation; bounded dtype/KV-cache choices; path confinement. |
 | `downloader.py` | `huggingface_hub.snapshot_download` with HF token, disk preflight, resume via the Hub cache, background jobs. |
-| `vllm_server.py` | Per-model `vllm serve` supervision: port allocation, readiness (`/health` + child liveness), SIGTERM/SIGKILL shutdown, log tail. |
+| `vllm_server.py` | Per-model `vllm serve` supervision: port allocation, readiness (`/health` + child liveness), SIGTERM/SIGKILL shutdown, log tail. Maps registry loading parameters to CLI flags. |
+| `llamacpp_server.py` | Per-model llama.cpp supervision for GGUF files: identity-checked liveness/stop, path confinement, loading parameters to CLI flags. |
 | `litellm_sync.py` | Rewrites the managed `model_list` block in `backend/config/litellm/config.yaml` and restarts LiteLLM. |
-| `router.py` | Admin-only `/api/v1/models*` endpoints; audit events. |
+| `router.py` | Admin-only `/api/v1/models*` endpoints incl. `PATCH` loading-parameter updates; audit events. |
 
 State machine: `registered → downloading → downloaded → starting → running →
 stopped`, with `error` carrying `last_error`. The vLLM process, its port and the
 download job are recorded in the registry; the model becomes selectable only
-when `running`. Full details in [model-management.md](model-management.md).
+when `running`. Admin-selectable loading parameters per engine are listed in
+[model-management.md](model-management.md).
 
 ---
 

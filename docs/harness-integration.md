@@ -222,6 +222,7 @@ operation). The gateway login page shares the same brand stylesheet.
 | GET | `/api/admin/models` | Model catalogue (ids and owners) plus the inference mode. Provider configuration and credentials are never returned. | LiteLLM `GET /models` + inference `GET /health` |
 | GET | `/api/admin/survey?refresh=0\|1` | Device/GPU/driver survey (cached 10 s; `refresh=1` re-runs). | agent platform `GET /api/v1/survey` |
 | GET/POST | `/api/admin/local-models` | List or register local models. | agent platform `/api/v1/models` |
+| PATCH | `/api/admin/local-models/{name}` | Update a model's loading parameters (mutation-guarded like POST). | agent platform `PATCH /api/v1/models/{name}` |
 | POST | `/api/admin/local-models/{name}/{download\|start\|stop\|restart\|delete}` | Local model lifecycle; `delete` accepts `?delete_files=1`. | agent platform `/api/v1/models/...` |
 | GET | `/api/admin/local-models/{name}/logs?tail=` | Tail the model's vLLM log. | agent platform `/api/v1/models/{name}/logs` |
 | GET | `/api/admin/services` | Service list with ports and pid liveness. | — |

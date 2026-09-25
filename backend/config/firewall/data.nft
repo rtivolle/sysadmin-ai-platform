@@ -1,0 +1,38 @@
+#!/usr/sbin/nft -f
+# Firewall ruleset for the DATA (state tier) host — multi-host split (PR-H1).
+#
+# NOT applied by the installer. Review the peer addresses and interface name,
+# then load explicitly:
+#     nft -f backend/config/firewall/data.nft
+#
+# Policy: default-deny. Valkey accepts from W and I; VictoriaLogs and SeaweedFS
+# accept from W only. No outbound requirements beyond backup export (site
+# policy, out of scope here).
+
+define LAN_IFACE         = "eth0"
+define PEER_WEB_IP       = 10.0.0.10   # W — agent platform, ForwardAuth, harness
+define PEER_INFERENCE_IP = 10.0.0.11   # I — LiteLLM in-process auth
+
+table inet sysadmin {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    ct state established,related accept
+    iif lo accept
+
+    # Valkey :6379 from W and I (quota / lease / approval / P1 / session state).
+    ip saddr $PEER_WEB_IP tcp dport 6379 accept
+    ip saddr $PEER_INFERENCE_IP tcp dport 6379 accept
+
+    # VictoriaLogs :9428 and SeaweedFS :8333/:8888/:9333 from W only.
+    ip saddr $PEER_WEB_IP tcp dport { 8333, 8888, 9333, 9428 } accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    ct state established,related accept
+    oif lo accept
+    # Backup export is handled by the resilience package over site channels.
+  }
+}

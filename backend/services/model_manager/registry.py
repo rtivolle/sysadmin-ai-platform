@@ -40,7 +40,15 @@ ALLOWED_FIELDS = {
     "updated_at", "last_error", "quantization", "max_model_len",
     "tensor_parallel_size", "gpu_memory_utilization", "server", "engine",
     "gguf_file", "ctx_size", "n_gpu_layers", "flash_attn",
+    "dtype", "kv_cache_dtype", "enforce_eager", "max_num_seqs",
+    "enable_prefix_caching", "threads", "batch_size", "mmap", "mlock",
 }
+
+# Bounded admin-selectable choices. The installed engine binary remains the
+# final authority on what it accepts; these sets keep the registry predictable
+# and prevent arbitrary CLI-argument injection through the API.
+VLLM_DTYPES = frozenset({"auto", "half", "float16", "bfloat16", "float", "float32"})
+VLLM_KV_CACHE_DTYPES = frozenset({"auto", "fp8", "fp8_e5m2", "fp8_e4m3", "fp8_inc", "fp8_ds"})
 
 
 def default_models_dir() -> str:
@@ -87,6 +95,22 @@ def validate_gguf_file(filename: Any) -> str:
             or not GGUF_FILE_RE.fullmatch(filename)):
         raise ValueError("gguf_file must be a GGUF filename without a directory path")
     return filename
+
+
+def validate_dtype(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in VLLM_DTYPES:
+        raise ValueError(f"dtype must be one of {sorted(VLLM_DTYPES)}")
+    return value
+
+
+def validate_kv_cache_dtype(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in VLLM_KV_CACHE_DTYPES:
+        raise ValueError(f"kv_cache_dtype must be one of {sorted(VLLM_KV_CACHE_DTYPES)}")
+    return value
 
 
 def _now() -> str:

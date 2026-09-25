@@ -241,6 +241,44 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
   Phase 2 live acceptance checks. The only real model evidence remains the
   separate direct llama.cpp smoke test above.
 
+## Model loading parameters (2026-09-25)
+
+- The admin can now select more loading parameters per engine and change them on
+  an existing model without re-registering:
+  - **vLLM** gains `dtype` (`auto`/`half`/`float16`/`bfloat16`/`float`/`float32`),
+    `kv_cache_dtype` (`auto`/`fp8`/`fp8_e5m2`/`fp8_e4m3`/`fp8_inc`/`fp8_ds`),
+    `max_num_seqs`, `enforce_eager` and `enable_prefix_caching`, mapped to the
+    matching `--dtype`/`--kv-cache-dtype`/`--max-num-seqs`/`--enforce-eager|--no-…`
+    /`--enable-prefix-caching|--no-…` flags. Explicit booleans override the
+    operator `VLLM_CONFIG` file in both directions.
+  - **llama.cpp** gains `threads`, `batch_size`, `mmap` (default true, emits
+    `--no-mmap` when false) and `mlock` (default false, emits `--mlock` when
+    true), beside the existing `ctx_size`/`n_gpu_layers`/`flash_attn`.
+  - **`PATCH /api/v1/models/{name}`** updates loading parameters of an inactive
+    model (409 while starting/downloading/running), accepts only the engine's
+    loading fields, and treats `null` as "clear" so the engine default applies at
+    next start. Clearing is safe because the command builders treat a stored
+    `null` as unset and fall back to the documented defaults. Audited as
+    `model_update` (see [AUDIT_CENSUS.md](AUDIT_CENSUS.md)).
+  - The admin console (*Modèles locaux*) exposes the parameters at registration
+    (engine selector, GGUF filename, advanced-loading-parameters section) and a
+    per-model **Paramètres** dialog that diffs against the stored values and
+    PATCHes only what changed. The gateway proxies `PATCH
+    /api/admin/local-models/{name}` and applies the same mutation CSRF guard as
+    POST (JSON content type, `X-Sysadmin-Admin` header, same-origin `Origin`).
+- Measured: `backend/tests/tier1_unit/test_model_manager.py` **59 passed**
+  (1.48 s) including the new command-flag, cleared-field fallback, dtype
+  validator, registration and PATCH API cases. Final `make test` (all backend
+  services stopped): **729 passed, 2 skipped, 0 failed** (~70 s); the two skips
+  are `shellcheck not installed` in `test_multihost_render.py`, unrelated to
+  this change. `tier3_concurrency` **145 passed**, `tier2_sandbox`+`tier4_recovery`
+  **183 passed**. `make compile` OK.
+- **Not measured:** the harness node suite (`make harness-test`) was not run in
+  this session because Node is unavailable in this environment; the gateway
+  PATCH proxy and admin-UI additions were self-reviewed instead. No live
+  vLLM/llama.cpp start exercised the new flags; the mapping is validated on
+  built command lines only.
+
 ## Previously recorded checks
 
 | Check | Result | Scope |
@@ -264,6 +302,7 @@ Last checked: 2026-09-24. Run tests with `backend/.venv/bin/python3 -m pytest -q
 | Custom dsh harness integration (2026-09-24, re-verified after the admin fall-through fix) | 57 node tests passed; 8/8 real-`dsh` checks; 37/37 live gateway checks | Profile composes with the `dsh-plugin-sysadmin` bundle, the plugin's load banner prints, the web surface binds and refuses an unauthenticated request, and the served index carries the Mila title/favicon; the JS command policy matches the Python gate action-for-action. The live gateway run covered two concurrent sysadmins on isolated instances (the verifier used 3210/3211 in the 3210–3260 scratch range; the running gateway serves the same users in the 3180–3280 range), launch handoff, sessions surviving a gateway SIGTERM+restart with instance re-adoption on the same port, Mila-branded login/admin pages, master-key admin login with backend verification, overview probes, an instance restart that reused the port, a real approval requested with a user key and decided in the console, audit query, `platform.sh service` restart, and session revocation. The gateway preserves the browser `Host` (rewriting it to the loopback instance port made the harness Origin fence answer 403 and kept the UI stuck behind login); per-instance trusted hosts carry the host's LAN addresses, and the verifier reuses one gateway port across its restart because the harness cookie is bound to the gateway authority. A real browser on `http://192.168.14.159:3085/` renders the signed-in user (`sysadmin-01`) in the sidebar, the Mila logo in the sidebar and hero brand seats, the tab pinned to *Mila — Sysadmin AI*, a files panel listing the user's workspace (`GET /api/sysadmin/surface`, paths confined to the per-user root), and no DeepSeek brand text, with zero console errors. A live gateway crash was fixed on 2026-09-24: the admin console's page and its session probe were served but reported unhandled for browsers holding both a user session and admin access, so the request fell through to the harness proxy and the double response killed the process (`ERR_HTTP_HEADERS_SENT`); admin handlers now report handled, `proxyHttp` drops an upstream response that would rewrite a committed one, and the 57th Node test pins the fall-through. All three counts were re-measured after the fix. |
 | Admin console UI redesign (2026-09-25) | 57 node tests passed; DOM + interaction QA passed at 390/768/1024/1440 px | `packages/harness-integration/gateway/admin-ui.{html,css,js}` and `assets/brand.css` were reworked into a sidebar console with a status topbar, hash deep links, arrow/Home/End roving-tabindex navigation, deduplicated toasts, a labelled `<dialog>` for destructive confirms, first-load skeletons, and per-panel feedback improvements (quota usage meters, approval countdown, audit LogsQL chips with expandable raw events, log wrap toggle, storage bar, state-dependent action buttons). Every `/api/admin/*` call, guard (quota dirty, local-models busy, 7 s/5 s polling) and DOM id is unchanged; `tests/admin.test.mjs` plus the other node suites stay green. Browser QA against a fabricated-data preview mock: all nine panels render at 390 and 1440 px with 0 px horizontal overflow and no console errors; nav badges come from live data; quota edits survive polling and save with read-back; instance logs tail and wrap; a service restart confirms in the dialog and writes the output drawer; logout→login renders cleanly after a dirty edit. Oracle gate 2 returned PASS-WITH-CONCERNS with no blockers; its one material finding (dirty/busy flags surviving logout) was fixed and re-verified. Screenshots were not captured — the automation's desktop window was not visible and the operator chose to skip them — so the visual claims above rest on DOM/computed-style measurements, not images. |
 | Full backend suite, current worktree (2026-09-25) | 702 passed, 2 skipped | `backend/.venv/bin/python3 -m pytest -q`, 65 s, run as the AGENTS §6 regression check for the JS-only admin-console redesign. The worktree includes other lanes' uncommitted changes and their tests, so this is a worktree measurement, not a release baseline; the two skips are live-service checks. The UI change itself touches no Python import path. |
+| Model loading parameters + PATCH endpoint (2026-09-25) | 729 passed, 2 skipped | Final `make test` after the model-loading-parameters lane: `test_model_manager.py` 59 passed; tier3 145 passed; tier2+tier4 183 passed. The two skips are `shellcheck not installed` in `test_multihost_render.py`. Harness node suite not run (no Node in this session). |
 
 The 23 skips in the table's historical row reflect a restricted workspace without delegated writable cgroups v2 or Bubblewrap namespaces, plus services intentionally stopped during a unit run; the five socket failures there were environment restrictions. On the current host those prerequisites exist, so the sandbox suite executes and passes, and the live stack run skips nothing. Sandbox tests still skip only when host prerequisites are missing, and a separate runner check verifies that commands fail closed instead of running without cgroup limits. A kernel-backed stress run on 2026-09-24 (`backend/tests/qualification/sandbox_stress.sh`, via `make stress-sandbox`) proves the ceilings on the runner's `systemd-run` leg: a 6 GiB allocation is OOM-killed at the 4 GiB ceiling, 400 spawn attempts are bounded to the 128-task ceiling with fork failures, four CPU spinners are throttled to a 2-CPU ratio, a 60 s sleep is killed at the 15 s deadline, a sandboxed client cannot reach a live listener on the host loopback, and the filesystem view is confined to the workspace. That run caught a real gap first: `memory.max` alone did not bound total memory — RSS pinned at 4 GiB while swap usage climbed without bound and the 6 GiB allocation survived. The runner now also enforces `memory.swap.max=0` (`MemorySwapMax=0` on the systemd leg; read-back-verified on the raw leg, fail-closed if it cannot be installed), and the OOM kill at the ceiling was re-measured after the fix. The raw cgroup-delegation leg could not be measured in the qualifying session (no delegated writable subtree in that cgroup); it was verified to fail closed instead — abort 126 before executing the command. Re-run `make stress-sandbox` under the platform account's delegated subtree on the production host to qualify the raw leg.
 
@@ -413,3 +452,63 @@ This is not a production acceptance certificate. The scoped target adapter and s
   stability are **not measured**. No final invoice: the instance remains
   running at ~$18.60/hour under operator control. Temporary local evidence:
   `/tmp/vast-deepseek-deploy-20260924/`.
+
+## Full logging of everything, always (2026-09-25)
+
+- User directive: full logging of everything, always. Delivered in four parts.
+- **Audit completeness.** Every model-manager lifecycle outcome now emits a
+  schema-conformant audit event, including all rejected/failed branches
+  (register/download/start/stop/restart/delete with `reason`/`error` extras,
+  the async start failure with `cleanup_not_confirmed`, and the async reviewer
+  identity preserved through the start job). `AUDIT_CENSUS.md` §3.8 enumerates
+  the rows; the earlier §3.8/§4 contradiction is resolved. 15 new pinning
+  tests in `backend/tests/tier1_unit/test_model_manager.py`.
+- **Always-on structured service logs.** New `backend/services/logging_setup.py`
+  (stdlib-only JSON-lines formatter, idempotent `configure()`, ASGI request
+  middleware). Wired into the agent platform, auth gateway and inference
+  engine (method/path/status/duration_ms per request), the audit outbox
+  worker, the approval gate (propose/block/decide/claim/complete; commands
+  logged as length + sha256 prefix only) and the model manager (lifecycle and
+  rejection events). Documented in `operations.md` ("Logging policy").
+- **Inference traffic.** One `completion` event per request on the inference
+  proxy with model/stream/status/duration/tokens/bytes/error — never content.
+  LiteLLM's identity-bound completion audit (census §3.7) remains the
+  canonical record and is not duplicated. 7 new tests in
+  `backend/tests/tier1_unit/test_inference_logging.py`.
+- **Redaction, enforced and tested.** No keys, tokens, authorization headers,
+  request bodies, query strings or prompt/completion content in any log line;
+  tests assert against the serialized JSON output. uvicorn's plain-text access
+  lines (which would include query strings) are disabled; every request is
+  logged as a bounded JSON `request` event instead.
+- Deliberate exclusions: `target_executor/main.py` (standalone stdlib-only
+  privileged file), the observability collector (its stdout is the Prometheus
+  output contract), and the harness JS gateway (another lane's active
+  surface). The mixed uvicorn/JSON log-file format is documented.
+- Measured (development host, full stack up): `make test`
+  **717 passed, 2 skipped** in 63.56 s; harness **57/57 node tests**.
+
+## Platform self-update — update.sh (2026-09-25)
+
+- New root-level `update.sh` + `make update` / `make update-check`: updates the
+  platform's own modules (backend services, harness package, dependencies,
+  optionally the pinned static binaries) from the git tracking branch via
+  fast-forward only, or from a directory checkout via `--source` (tar overlay
+  with `keys`/`data`/`logs`/`run`/`bin`/`node_modules` excluded). It re-runs
+  `install.sh` (which keeps existing keys and binaries), refreshes the harness
+  profile, then restarts exactly the services whose PID files were alive, in
+  dependency order. Every outcome is one JSON line in `backend/logs/update.log`.
+  Documented in `docs/update.md`; golden commands in `AGENTS.md`/`Makefile`.
+- Fail-closed properties, pinned by tests: refuses a dirty working tree,
+  a diverged or non-fast-forwardable history, a checkout without provisioned
+  secrets, and a confirmation without a terminal or `--yes`; never resets,
+  rebases or rewrites history; secrets are preserved byte-for-byte across both
+  modes; the `--source` overlay never copies keys, state, logs, run, binaries
+  or harness dependency closures from the source tree.
+- Measured (development host, 2026-09-25): `backend/tests/tier1_unit/
+  test_update_script.py` **10 passed** (local bare-repo fixtures, no network;
+  covers check/apply/refusal/overlay/confirmation paths); `make compile` OK.
+  Full suite: `make test` **729 passed, 2 skipped** in 70.0 s (the 2 skips are
+  the existing environment-dependent checks, not update coverage).
+- Not measured here: a live `./update.sh` run against the real platform stack
+  with running services (the restart path is covered by fixtures only), and
+  `--binaries` re-download on this host (network download of pinned binaries).

@@ -1,8 +1,10 @@
 # Multi-host deployment design — three-machine topology
 
-Date: 24 September 2026. Status: **design, not implemented, not verified.**
-Nothing on this page has been run; it becomes true only through the
-implementation work item PR-H1 in [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
+Date: 24 September 2026. Status: **designed; PR-H1 implemented, not verified.**
+The role plumbing (role flags, role-aware `platform.sh`, config rendering,
+firewall rulesets, connectivity check) is implemented and unit-tested, but the
+topology has never been run on three machines. Operator guide:
+[docs/multi-host.md](../multi-host.md).
 
 This document designs the split of the platform across three machines:
 
@@ -222,3 +224,35 @@ Must become role/address-aware:
 |---|---|---|
 | Three-machine implementation | PR-H1 (P1) | Role prompts (§6), role-aware `platform.sh`/`install.sh`, config templating (§7), firewall rule sets (§4), key-copy runbook (§5), staged bring-up + remote-store suite on real machines |
 | Inter-machine TLS | PR-H2 (P2) | Valkey TLS, HTTPS upstreams with verification, cert provisioning in `install.sh`, required before any non-isolated network |
+
+## 11. PR-H1 implementation notes
+
+What landed (see [docs/multi-host.md](../multi-host.md) for the operator flow):
+
+- **`backend/config/roles/deployment.env.example`** — role + peer addresses +
+  `LAN_BIND_IP` template. `deployment.env` is git-ignored (`*.env`).
+- **`backend/platform.sh`** — loads `deployment.env`; `role_services()` gates
+  start/stop/status to the role's services; forces loopback for `all`; exports
+  `VALKEY_URL`/`VICTORIALOGS_URL`/`LITELLM_URL`/`SYSADMIN_LITELLM_URL` from
+  peers; binds VictoriaLogs/SeaweedFS/LiteLLM to `LAN_BIND_IP`.
+- **`backend/config/roles/render_config.py`** — renders `valkey/valkey.conf`
+  (`data` adds LAN `bind`) and `traefik/dynamic.yml` (`web` points LiteLLM /
+  SeaweedFS / VictoriaLogs upstreams at peers). `all` reproduces the checked-in
+  files byte-for-byte.
+- **`backend/config/roles/connectivity_check.py`** — fail-closed TCP check to
+  required peer ports; `install.sh` runs it before applying.
+- **`backend/config/firewall/{web,inference,data}.nft`** — per-role rulesets
+  implementing the §4 matrix; not applied automatically.
+- **`install.sh`** — `--role` / `--peer-*` / `--lan-bind-ip` flags, role-scoped
+  binary downloads and directory creation, role-aware key provisioning (W
+  provisions; I/D print the copy list).
+- **`backend/installer_tui.py`** — role/peer prompt step, deployment.env write,
+  connectivity check, and post-apply render.
+
+Open follow-ups encoded in this design (not yet done): `docs/backup-restore.md`
+still describes single-host key backup and must be updated to state that W/I key
+backup is a per-machine operator step and D's backup covers the state tier.
+`SYSADMIN_LITELLM_URL` and `VICTORIALOGS_URL` are exported by `platform.sh` so
+the harness admin console (W) sees the peer URLs; verify the console's
+`gateway/admin.js` audit/health paths against remote D before relying on them.
+

@@ -1,0 +1,40 @@
+#!/usr/sbin/nft -f
+# Firewall ruleset for the WEB (application tier) host — multi-host split (PR-H1).
+#
+# NOT applied by the installer. Review the peer addresses and interface name,
+# then load explicitly:
+#     nft -f backend/config/firewall/web.nft
+#
+# Policy: default-deny. Only the user-facing TLS front door and the two peer
+# links are open. Everything else (SSH management) follows site policy and is
+# out of scope here.
+
+define LAN_IFACE         = "eth0"
+define PEER_INFERENCE_IP = 10.0.0.11   # I — LiteLLM :4000
+define PEER_DATA_IP      = 10.0.0.12   # D — Valkey :6379, SeaweedFS :8333, VictoriaLogs :9428
+
+table inet sysadmin {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    ct state established,related accept
+    iif lo accept
+
+    # User networks reach only the front door: 8443 (TLS) + 8080 (redirect).
+    iifname $LAN_IFACE tcp dport 8443 accept
+    iifname $LAN_IFACE tcp dport 8080 accept
+    # ForwardAuth (3081), agent platform (3080) and harness gateway (3085) are
+    # loopback-only and reached only through Traefik; no LAN inbound accept.
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    ct state established,related accept
+    oif lo accept
+
+    # Outbound to the two peers only.
+    ip daddr $PEER_INFERENCE_IP tcp dport 4000 accept
+    ip daddr $PEER_DATA_IP tcp dport { 6379, 8333, 9428 } accept
+  }
+}

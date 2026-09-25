@@ -1,0 +1,23 @@
+# Operator-owned vLLM native configuration. Restart models after editing.
+# Registry values override these defaults. Host/port/model/name are platform-owned.
+dtype: auto
+tensor-parallel-size: 1
+pipeline-parallel-size: 1
+gpu-memory-utilization: 0.85
+max-model-len: 8192
+max-num-seqs: 32
+max-num-batched-tokens: 8192
+kv-cache-dtype: auto
+enable-prefix-caching: true
+enable-chunked-prefill: true
+enforce-eager: false
+trust-remote-code: false
+# Model-specific examples: enable only when supported by your model/vLLM version.
+# quantization: awq
+# tool-call-parser: hermes
+# enable-auto-tool-choice: true
+# reasoning-parser: deepseek_r1
+# cpu-offload-gb: 0
+# speculative-config: {model: org/draft-model, num_speculative_tokens: 5}
+# compilation-config: {level: 3}
+# limit-mm-per-prompt: {image: 1, video: 0}

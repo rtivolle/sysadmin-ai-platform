@@ -48,7 +48,8 @@ before exposing it beyond the host.
 | `MODELS_REGISTRY` | `$MODELS_DIR/registry.json` | model manager | Registry file (0600, atomic). |
 | `HF_TOKEN` / `HF_TOKEN_FILE` | empty / `config/keys/hf-token.key` | downloader | HuggingFace token for gated repos. |
 | `HF_ENDPOINT` / `HF_HOME` / `HF_HUB_OFFLINE` | library defaults | downloader | Mirror, cache and offline mode (read by `huggingface_hub`). |
-| `VLLM_BIN` | `vllm` on `PATH` | model manager | vLLM executable. |
+| `VLLM_BIN` | `backend/.vllm-venv/bin/vllm` when installed, otherwise `vllm` on `PATH` | model manager | vLLM executable; explicit values override the installer default. |
+| `VLLM_VENV_DIR` | `backend/.vllm-venv` | installer/platform | Isolated Python environment for vLLM. |
 | `MODEL_PORT_START` / `MODEL_PORT_END` | `8100` / `8199` | model manager | Per-model vLLM port range. |
 | `MODEL_LOG_DIR` | `backend/logs/models` | model manager | vLLM log directory. |
 | `LITELLM_CONFIG` | `config/litellm/config.yaml` | model manager | Config the managed `model_list` block is written to. |

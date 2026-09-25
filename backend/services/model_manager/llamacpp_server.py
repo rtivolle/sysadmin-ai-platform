@@ -47,16 +47,30 @@ def build_command(entry: Dict[str, Any], port: int, path: str) -> list:
     binary = llamacpp_bin()
     if not binary:
         raise FileNotFoundError("llama-server executable not found (set LLAMACPP_BIN or add it to PATH)")
-    ctx_size = int(entry.get("ctx_size", 2048))
+    # A field explicitly cleared by an admin (JSON null) falls back to its default.
+    raw_ctx = entry.get("ctx_size")
+    ctx_size = int(raw_ctx) if raw_ctx is not None else 2048
     if not 512 <= ctx_size <= 131072:
         raise ValueError("ctx_size must be between 512 and 131072")
-    n_gpu_layers = entry.get("n_gpu_layers", "all")
+    raw_layers = entry.get("n_gpu_layers")
+    n_gpu_layers = "all" if raw_layers is None else raw_layers
     if n_gpu_layers != "all" and (type(n_gpu_layers) is not int or n_gpu_layers < 0):
         raise ValueError("n_gpu_layers must be 'all' or a non-negative integer")
-    flash_attn = entry.get("flash_attn", True)
+    raw_flash = entry.get("flash_attn")
+    flash_attn = True if raw_flash is None else raw_flash
     if type(flash_attn) is not bool:
         raise ValueError("flash_attn must be a boolean")
-    return [
+    threads = entry.get("threads")
+    if threads is not None:
+        threads = int(threads)
+        if threads < 1:
+            raise ValueError("threads must be positive")
+    batch_size = entry.get("batch_size")
+    if batch_size is not None:
+        batch_size = int(batch_size)
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+    command = [
         binary, "--model", path, "--alias", entry["name"],
         "--host", "127.0.0.1", "--port", str(port),
         "--ctx-size", str(ctx_size), "--parallel", "1",
@@ -64,6 +78,15 @@ def build_command(entry: Dict[str, Any], port: int, path: str) -> list:
         "--flash-attn", "on" if flash_attn else "off",
         "--reasoning", "off",
     ]
+    if threads is not None:
+        command += ["--threads", str(threads)]
+    if batch_size is not None:
+        command += ["--batch-size", str(batch_size)]
+    if entry.get("mmap") is False:
+        command += ["--no-mmap"]
+    if entry.get("mlock") is True:
+        command += ["--mlock"]
+    return command
 
 
 def _child_environment() -> Dict[str, str]:
@@ -93,7 +116,13 @@ def _process_matches(entry: Dict[str, Any], store: registry_module.ModelRegistry
             args = [value.decode("utf-8", errors="replace") for value in cmdline_file.read().split(b"\0") if value]
         expected_model = _managed_model_path(entry["name"], entry.get("gguf_file"), store)
         expected_port = str(int(server.get("port") or 0))
+    except FileNotFoundError:
+        return False
     except (OSError, ValueError, KeyError, TypeError):
+        # If process identity cannot be read, callers must fail closed without
+        # signalling or clearing a potentially live model record.
+        raise
+    if not args:
         return False
     return (
         os.path.basename(args[0]) == "llama-server"

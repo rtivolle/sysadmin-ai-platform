@@ -46,6 +46,36 @@ class RestoreManager:
         self.data_dir = Path(data_dir or DATA_DIR)
         self.config_dir = Path(config_dir or CONFIG_DIR)
 
+    def restore_from_offhost(
+        self,
+        offhost_dest: str,
+        backup_id: str,
+        target_staging_base: Optional[Path] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Fetch a backup from off-host storage, verify its SHA-256, then restore.
+
+        Pulls ``<backup_id>.tar.gz``, ``<backup_id>.manifest.json`` and the
+        ``.sha256`` sidecar into a local scratch directory, recomputes the
+        archive hash against the sidecar (raising ``OffhostBackupError`` on any
+        mismatch or missing file), and delegates to ``restore_from_archive``.
+        """
+        from .offhost_backup import fetch_offhost_archive
+
+        scratch = Path(tempfile.mkdtemp(prefix="offhost_restore_"))
+        try:
+            archive_path, manifest_path = fetch_offhost_archive(
+                offhost_dest, backup_id, scratch
+            )
+            return self.restore_from_archive(
+                archive_path=archive_path,
+                manifest_path=manifest_path,
+                target_staging_base=target_staging_base,
+                dry_run=dry_run,
+            )
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
     def restore_from_archive(
         self,
         archive_path: Path,

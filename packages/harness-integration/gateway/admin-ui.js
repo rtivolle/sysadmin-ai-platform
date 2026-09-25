@@ -906,6 +906,99 @@ function modelStatusBadge(status) {
   return `<span class="mila-badge ${cls}">${esc(modelStatusLabels[status] ?? status)}</span>`
 }
 
+// Loading parameters an admin can select per engine, mirroring the model
+// manager API. `default: true` marks the engine's own default for a boolean,
+// which registration reproduces even when the caller does not choose.
+const ENGINE_PARAMS = {
+  vllm: [
+    { key: 'max_model_len', label: 'Contexte max (tokens)', type: 'number', min: 1, placeholder: 'défaut' },
+    { key: 'tensor_parallel_size', label: 'Parallélisme tensoriel', type: 'number', min: 1, placeholder: 'défaut' },
+    { key: 'gpu_memory_utilization', label: 'Mémoire GPU (0–1)', type: 'number', min: 0.01, max: 1, step: 0.01, placeholder: 'défaut' },
+    { key: 'max_num_seqs', label: 'Séquences simultanées', type: 'number', min: 1, placeholder: 'défaut' },
+    { key: 'dtype', label: 'Précision (dtype)', type: 'select', options: ['auto', 'half', 'float16', 'bfloat16', 'float', 'float32'] },
+    { key: 'kv_cache_dtype', label: 'Cache KV (dtype)', type: 'select', options: ['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'fp8_inc', 'fp8_ds'] },
+    { key: 'quantization', label: 'Quantization', type: 'text', placeholder: 'ex. awq, gptq, fp8' },
+    { key: 'enforce_eager', label: 'Mode eager (sans graph CUDA)', type: 'bool' },
+    { key: 'enable_prefix_caching', label: 'Cache de préfixes', type: 'bool' },
+  ],
+  llamacpp: [
+    { key: 'ctx_size', label: 'Contexte (tokens)', type: 'number', min: 512, max: 131072, placeholder: '2048' },
+    { key: 'n_gpu_layers', label: 'Couches GPU (« all » ou entier)', type: 'text', placeholder: 'all' },
+    { key: 'threads', label: 'Threads CPU', type: 'number', min: 1, placeholder: 'défaut' },
+    { key: 'batch_size', label: 'Taille de lot', type: 'number', min: 1, placeholder: 'défaut' },
+    { key: 'flash_attn', label: 'Attention flash', type: 'bool', default: true },
+    { key: 'mmap', label: 'Mappage mémoire (mmap)', type: 'bool', default: true },
+    { key: 'mlock', label: 'Verrouillage RAM (mlock)', type: 'bool', default: false },
+  ],
+}
+
+function modelParamsHtml(engine, values = {}) {
+  return (ENGINE_PARAMS[engine] ?? []).map((field) => {
+    const value = values[field.key]
+    if (field.type === 'bool') {
+      const checked = value === undefined ? field.default === true : Boolean(value)
+      return `<label class="mila-check"><input type="checkbox" name="${esc(field.key)}" ${checked ? 'checked' : ''}> ${esc(field.label)}</label>`
+    }
+    if (field.type === 'select') {
+      const options = field.options.map((option) =>
+        `<option value="${esc(option)}" ${value === option ? 'selected' : ''}>${esc(option)}</option>`).join('')
+      return `<label>${esc(field.label)}<select class="mila-input" name="${esc(field.key)}"><option value="">— défaut —</option>${options}</select></label>`
+    }
+    const attrs = [
+      `type="${field.type}"`,
+      `name="${esc(field.key)}"`,
+      field.min !== undefined ? `min="${field.min}"` : '',
+      field.max !== undefined ? `max="${field.max}"` : '',
+      field.step !== undefined ? `step="${field.step}"` : '',
+      `placeholder="${esc(field.placeholder ?? '')}"`,
+    ].join(' ')
+    return `<label>${esc(field.label)}<input class="mila-input" ${attrs} ${value !== undefined && value !== null ? `value="${esc(value)}"` : ''}></label>`
+  }).join('')
+}
+
+function readModelParams(form, engine, { register = false } = {}) {
+  const body = {}
+  for (const field of ENGINE_PARAMS[engine] ?? []) {
+    const input = form.elements[field.key]
+    if (!input) continue
+    if (field.type === 'bool') {
+      // At registration a vLLM boolean without an API default is only sent
+      // when explicitly ticked, so it never silently overrides the operator
+      // config file. llama.cpp booleans always mirror their API defaults.
+      if (register && field.default === undefined && !input.checked) continue
+      body[field.key] = input.checked
+      continue
+    }
+    const raw = String(input.value ?? '').trim()
+    if (raw === '') {
+      body[field.key] = null
+      continue
+    }
+    if (field.key === 'n_gpu_layers' && /^\d+$/.test(raw)) {
+      body[field.key] = Number(raw)
+      continue
+    }
+    if (field.type === 'number') {
+      const parsed = Number(raw)
+      if (!Number.isFinite(parsed)) continue
+      body[field.key] = parsed
+      continue
+    }
+    body[field.key] = raw
+  }
+  return body
+}
+
+function diffModelParams(current, initial) {
+  const body = {}
+  for (const key of new Set([...Object.keys(initial), ...Object.keys(current)])) {
+    if (JSON.stringify(current[key] ?? null) !== JSON.stringify(initial[key] ?? null)) {
+      body[key] = current[key] ?? null
+    }
+  }
+  return body
+}
+
 async function renderLocalModels() {
   if (state.localModelsDirty || state.localModelsBusy) return
   const generation = state.authGeneration
@@ -933,6 +1026,7 @@ async function renderLocalModels() {
           ${running ? `<button class="mila-button secondary small" data-model="${esc(model.name)}" data-action="restart">Redémarrer</button>` : ''}
           ${running ? `<button class="mila-button danger small" data-model="${esc(model.name)}" data-action="stop">Arrêter</button>` : ''}
           <button class="mila-button ghost small" data-model="${esc(model.name)}" data-action="logs">Journal</button>
+          ${!running && model.status !== 'starting' && model.status !== 'downloading' ? `<button class="mila-button ghost small" data-model="${esc(model.name)}" data-action="params">Paramètres</button>` : ''}
           ${!running && model.status !== 'starting' ? `<button class="mila-button danger ghost small" data-model="${esc(model.name)}" data-action="delete">Supprimer</button>` : ''}
         </div>
       </td></tr>`
@@ -948,6 +1042,18 @@ async function renderLocalModels() {
           <label>Nom du service (optionnel)<input class="mila-input" name="name" placeholder="déduit du dépôt"></label>
           <label>Révision (optionnel)<input class="mila-input" name="revision" placeholder="main"></label>
         </div>
+        <div class="mila-grid-2">
+          <label>Moteur
+            <select class="mila-input" name="engine">
+              <option value="vllm">vLLM</option>
+              <option value="llamacpp">llama.cpp (GGUF)</option>
+            </select>
+          </label>
+          <label id="gguf-field" hidden>Fichier GGUF<input class="mila-input" name="gguf_file" placeholder="model.Q6_K.gguf"></label>
+        </div>
+        <label class="mila-check"><input type="checkbox" id="register-params-toggle"> Paramètres de chargement avancés</label>
+        <div id="register-params" class="mila-grid-2" hidden></div>
+        <p class="mila-muted" id="register-params-hint" hidden>Les champs vides laissent le moteur ou la configuration opérateur décider. Vous pourrez ajuster ces paramètres plus tard avec le bouton « Paramètres ».</p>
         <button class="mila-button" type="submit">Enregistrer</button>
       </form>
       <div id="local-model-log" class="mila-log-card" hidden></div>
@@ -957,13 +1063,35 @@ async function renderLocalModels() {
     </div>`
 
   $('local-model-form').addEventListener('input', () => { state.localModelsDirty = true })
+
+  const registerEngine = () => {
+    const engine = $('local-model-form').elements.engine.value
+    $('gguf-field').hidden = engine !== 'llamacpp'
+    $('register-params').innerHTML = modelParamsHtml(engine)
+  }
+  registerEngine()
+  $('local-model-form').elements.engine.addEventListener('change', registerEngine)
+  $('register-params-toggle').addEventListener('change', () => {
+    const show = $('register-params-toggle').checked
+    $('register-params').hidden = !show
+    $('register-params-hint').hidden = !show
+  })
+
   $('local-model-form').addEventListener('submit', async (event) => {
     event.preventDefault()
     const form = event.target
+    const engine = form.elements.engine.value
     const body = {
       hf_repo: form.elements.hf_repo.value,
       name: form.elements.name.value || undefined,
       revision: form.elements.revision.value || undefined,
+      engine,
+    }
+    if (engine === 'llamacpp') {
+      body.gguf_file = form.elements.gguf_file.value.trim() || undefined
+    }
+    for (const [key, value] of Object.entries(readModelParams(form, engine, { register: true }))) {
+      if (value !== null) body[key] = value
     }
     state.localModelsBusy = true
     try {
@@ -979,7 +1107,14 @@ async function renderLocalModels() {
   })
 
   for (const button of $('tab-local-models').querySelectorAll('[data-model]')) {
-    button.addEventListener('click', () => runModelAction(button.dataset.model, button.dataset.action))
+    button.addEventListener('click', () => {
+      if (button.dataset.action === 'params') {
+        const model = models.find((entry) => entry.name === button.dataset.model)
+        if (model) openModelParamsDialog(model)
+        return
+      }
+      runModelAction(button.dataset.model, button.dataset.action)
+    })
   }
 }
 
@@ -1014,6 +1149,51 @@ async function runModelAction(name, action) {
     state.localModelsBusy = false
     renderLocalModels().catch((error) => setError(error.message))
   }
+}
+
+async function openModelParamsDialog(model) {
+  const dialog = $('model-params-dialog')
+  if (dialog.open) return
+  const engine = model.engine === 'llamacpp' ? 'llamacpp' : 'vllm'
+  const values = {}
+  for (const field of ENGINE_PARAMS[engine] ?? []) {
+    const raw = model[field.key]
+    values[field.key] = field.type === 'bool'
+      ? (raw === undefined ? field.default === true : Boolean(raw))
+      : (raw ?? null)
+  }
+  $('model-params-title').textContent = `Paramètres de chargement — ${model.name}`
+  $('model-params-engine').textContent = engine === 'llamacpp' ? 'llama.cpp (GGUF)' : 'vLLM'
+  $('model-params-fields').innerHTML = modelParamsHtml(engine, values)
+  dialog._initial = values
+  dialog._engine = engine
+  dialog._name = model.name
+  dialog.showModal()
+}
+
+function bindModelParamsDialog() {
+  const dialog = $('model-params-dialog')
+  $('model-params-cancel').addEventListener('click', () => dialog.close())
+  $('model-params-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const current = readModelParams($('model-params-form'), dialog._engine)
+    const body = diffModelParams(current, dialog._initial ?? {})
+    if (Object.keys(body).length === 0) {
+      dialog.close()
+      return
+    }
+    state.localModelsBusy = true
+    try {
+      await api(`/api/admin/local-models/${encodeURIComponent(dialog._name)}`, { method: 'PATCH', body })
+      setError('')
+      dialog.close()
+    } catch (error) {
+      setError(error.message)
+    } finally {
+      state.localModelsBusy = false
+      renderLocalModels().catch((error) => setError(error.message))
+    }
+  })
 }
 
 // ── Hardware survey ──────────────────────────────────────────────────────────
@@ -1417,6 +1597,7 @@ RENDERERS.hardware = renderHardware
 async function boot() {
   // Normalize the initial hash before the first render so deep links work and
   // a bare load lands on #overview.
+  bindModelParamsDialog()
   if (!TABS.includes(location.hash.slice(1))) {
     history.replaceState(null, '', '#overview')
   }
