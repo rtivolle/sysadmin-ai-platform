@@ -77,7 +77,7 @@ make harness-verify
 make compile
 ```
 
-Harness verification is covered by `make harness-test` and `make harness-verify`; see [`docs/testing.md`](docs/testing.md) for direct command-level details.
+Harness package tests run via `make harness-test`; live harness wiring verification runs via `make harness-verify`. See [`docs/testing.md`](docs/testing.md) for details.
 
 ## Core components
 
