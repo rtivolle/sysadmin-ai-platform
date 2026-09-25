@@ -9,24 +9,43 @@
   <link rel="stylesheet" href="/admin-ui.css">
 </head>
 <body class="mila">
+  <a class="mila-skip" href="#main">Aller au contenu</a>
+
   <header class="mila-header">
-    <a href="https://mila.quebec/" target="_blank" rel="noopener"><img src="/assets/mila-logo.png" alt="Mila"></a>
-    <span class="mila-title">Console d'administration — Plateforme IA Sysadmin</span>
+    <a class="mila-brand" href="https://mila.quebec/" target="_blank" rel="noopener"><img src="/assets/mila-logo.png" alt="Mila"></a>
+    <span class="mila-title">Console d'administration<span class="mila-title-sub">Plateforme IA Sysadmin</span></span>
     <span class="mila-spacer"></span>
+    <span class="mila-status-chip" id="gateway-chip" title="État de la passerelle">
+      <span class="mila-dot" id="gateway-chip-dot"></span>
+      <span id="gateway-chip-label">Passerelle</span>
+    </span>
+    <span class="mila-muted" id="last-updated"></span>
+    <button class="mila-button ghost icon-only" id="refresh" type="button" title="Rafraîchir la section" aria-label="Rafraîchir la section">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
     <span class="mila-muted" id="admin-user"></span>
-    <button class="mila-button secondary" id="logout" hidden>Déconnexion</button>
+    <button class="mila-button secondary" id="logout" type="button" hidden>Déconnexion</button>
   </header>
 
-  <main class="mila-admin">
+  <main class="mila-main" id="main">
     <section id="login-view" hidden>
       <div class="mila-login">
         <div class="mila-card">
+          <div class="mila-login-brand">
+            <a href="https://mila.quebec/" target="_blank" rel="noopener"><img src="/assets/mila-logo.png" alt="Mila"></a>
+          </div>
           <h1>Console d'administration</h1>
-          <p class="subtitle">Accès réservé — jeton maître de la plateforme.</p>
+          <p class="subtitle">Accès réservé. Authentifiez-vous avec le jeton maître de la plateforme.</p>
           <form id="login-form">
-            <label for="token" class="mila-muted">Jeton maître (master.key)</label>
-            <input class="mila-input" id="token" type="password" autocomplete="current-password" required>
-            <p class="mila-error" id="login-error"></p>
+            <label for="token" class="mila-label">Jeton maître</label>
+            <div class="mila-secret">
+              <input class="mila-input" id="token" type="password" autocomplete="current-password" spellcheck="false" required>
+              <button class="mila-button ghost small icon-only" id="token-reveal" type="button" aria-pressed="false" title="Afficher le jeton" aria-label="Afficher le jeton">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+            <p class="mila-help">Fichier <code>backend/config/keys/master.key</code> sur l'hôte.</p>
+            <p class="mila-error" id="login-error" role="alert"></p>
             <button class="mila-button" type="submit" id="login-submit">Se connecter</button>
           </form>
         </div>
@@ -34,31 +53,87 @@
     </section>
 
     <section id="console-view" hidden>
-      <nav class="mila-tabs" id="tabs">
-        <button data-tab="overview" class="active">Vue d'ensemble</button>
-        <button data-tab="users">Utilisateurs &amp; sessions</button>
-        <button data-tab="quotas">Quotas</button>
-        <button data-tab="instances">Runtimes</button>
-        <button data-tab="models">Modèles disponibles</button>
-        <button data-tab="local-models">Modèles locaux</button>
-        <button data-tab="approvals">Approbations</button>
-        <button data-tab="audit">Audit</button>
-        <button data-tab="services">Services</button>
-        <button data-tab="hardware">Matériel</button>
-      </nav>
-      <p class="mila-error" id="console-error"></p>
-      <div id="tab-overview"></div>
-      <div id="tab-users" hidden></div>
-      <div id="tab-quotas" hidden></div>
-      <div id="tab-instances" hidden></div>
-      <div id="tab-models" hidden></div>
-      <div id="tab-local-models" hidden></div>
-      <div id="tab-approvals" hidden></div>
-      <div id="tab-audit" hidden></div>
-      <div id="tab-services" hidden></div>
-      <div id="tab-hardware" hidden></div>
+      <div class="mila-console">
+        <aside class="mila-sidebar">
+          <nav class="mila-nav" id="tabs" role="tablist" aria-orientation="vertical" aria-label="Sections de la console">
+            <button class="mila-nav-item" id="nav-overview" data-tab="overview" role="tab" aria-selected="true" aria-controls="tab-overview" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+              <span class="label">Vue d'ensemble</span>
+            </button>
+            <button class="mila-nav-item" id="nav-users" data-tab="users" role="tab" aria-selected="false" aria-controls="tab-users" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              <span class="label">Utilisateurs &amp; sessions</span>
+            </button>
+            <button class="mila-nav-item" id="nav-quotas" data-tab="quotas" role="tab" aria-selected="false" aria-controls="tab-quotas" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>
+              <span class="label">Quotas</span>
+            </button>
+            <button class="mila-nav-item" id="nav-instances" data-tab="instances" role="tab" aria-selected="false" aria-controls="tab-instances" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><path d="M6 6.5h.01M6 17.5h.01"/></svg>
+              <span class="label">Runtimes</span>
+              <span class="mila-nav-badge" data-badge="instances" hidden></span>
+            </button>
+            <button class="mila-nav-item" id="nav-models" data-tab="models" role="tab" aria-selected="false" aria-controls="tab-models" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+              <span class="label">Modèles disponibles</span>
+            </button>
+            <button class="mila-nav-item" id="nav-local-models" data-tab="local-models" role="tab" aria-selected="false" aria-controls="tab-local-models" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg>
+              <span class="label">Modèles locaux</span>
+              <span class="mila-nav-badge" data-badge="local-models" hidden></span>
+            </button>
+            <button class="mila-nav-item" id="nav-approvals" data-tab="approvals" role="tab" aria-selected="false" aria-controls="tab-approvals" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+              <span class="label">Approbations</span>
+              <span class="mila-nav-badge" data-badge="approvals" hidden></span>
+            </button>
+            <button class="mila-nav-item" id="nav-audit" data-tab="audit" role="tab" aria-selected="false" aria-controls="tab-audit" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></svg>
+              <span class="label">Audit</span>
+            </button>
+            <button class="mila-nav-item" id="nav-services" data-tab="services" role="tab" aria-selected="false" aria-controls="tab-services" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span class="label">Services</span>
+              <span class="mila-nav-badge" data-badge="services" hidden></span>
+            </button>
+            <button class="mila-nav-item" id="nav-hardware" data-tab="hardware" role="tab" aria-selected="false" aria-controls="tab-hardware" type="button">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
+              <span class="label">Matériel</span>
+            </button>
+          </nav>
+          <div class="mila-sidebar-foot" id="sidebar-context" hidden></div>
+        </aside>
+        <div class="mila-content">
+          <div id="console-error" class="mila-alert" role="alert" hidden></div>
+          <section class="mila-panel" id="tab-overview" role="tabpanel" aria-labelledby="nav-overview" tabindex="0"></section>
+          <section class="mila-panel" id="tab-users" role="tabpanel" aria-labelledby="nav-users" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-quotas" role="tabpanel" aria-labelledby="nav-quotas" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-instances" role="tabpanel" aria-labelledby="nav-instances" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-models" role="tabpanel" aria-labelledby="nav-models" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-local-models" role="tabpanel" aria-labelledby="nav-local-models" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-approvals" role="tabpanel" aria-labelledby="nav-approvals" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-audit" role="tabpanel" aria-labelledby="nav-audit" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-services" role="tabpanel" aria-labelledby="nav-services" tabindex="0" hidden></section>
+          <section class="mila-panel" id="tab-hardware" role="tabpanel" aria-labelledby="nav-hardware" tabindex="0" hidden></section>
+        </div>
+      </div>
     </section>
   </main>
+
+  <div id="toasts" class="mila-toasts" aria-live="polite"></div>
+
+  <dialog id="confirm-dialog" class="mila-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-message"></p>
+    <label class="mila-dialog-extra" id="confirm-extra-wrap" hidden>
+      <input type="checkbox" id="confirm-extra">
+      <span id="confirm-extra-label"></span>
+    </label>
+    <div class="mila-row">
+      <button class="mila-button secondary" id="confirm-cancel" type="button">Annuler</button>
+      <button class="mila-button danger" id="confirm-ok" type="button">Confirmer</button>
+    </div>
+  </dialog>
 
   <footer class="mila-footer">
     <a href="https://mila.quebec/" target="_blank" rel="noopener">Mila — Institut québécois d'intelligence artificielle</a>

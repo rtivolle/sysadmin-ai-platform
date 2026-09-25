@@ -1,55 +1,818 @@
-/* Admin-console-only layout; colors and primitives live in assets/brand.css. */
+/*
+ * Admin-console layout on top of the Mila brand primitives. Design tokens,
+ * buttons, badges, inputs, tables, logs, skeletons, toasts, dialogs and the
+ * login card all live in assets/brand.css — this file owns the shell (topbar,
+ * sidebar, router panels) and the console-specific surfaces (stat tiles,
+ * service cards, quota cards, log toolbar) plus the responsive rules.
+ */
 [hidden] { display: none !important; }
 
-#login-view .mila-card form {
-  display: block;
+/* ── Topbar ─────────────────────────────────────────────────────────────── */
+
+.mila-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  padding: 0.55rem 1.25rem;
+  gap: 0.75rem;
+  box-shadow: var(--mila-shadow-sm);
 }
 
-#login-view .mila-card label {
-  display: block;
-  margin-bottom: 0.3rem;
+.mila-header img {
+  height: 30px;
 }
 
-#login-view .mila-card input {
-  margin-bottom: 0.4rem;
+.mila-header .mila-title {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.12;
+  gap: 0.05rem;
+}
+
+.mila-header .mila-title-sub {
+  font-size: var(--mila-text-xs);
+  font-weight: 400;
+  color: var(--mila-muted);
+  letter-spacing: 0.03em;
+}
+
+.mila-header .mila-spacer {
+  flex: 1 1 auto;
+  min-width: 0.5rem;
 }
 
 #admin-user {
-  margin-right: 0.5rem;
+  font-weight: 600;
+  color: var(--mila-slate);
 }
 
-#tab-overview .mila-table td,
-#tab-overview .mila-table th {
-  width: auto;
+#last-updated {
+  font-variant-numeric: tabular-nums;
 }
 
-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.82em;
-  background: #f0f1f6;
-  border-radius: 4px;
-  padding: 0.05rem 0.3rem;
+/* ── Gateway status chip ────────────────────────────────────────────────── */
+
+.mila-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.25rem 0.7rem;
+  border: 1px solid var(--mila-line);
+  border-radius: 999px;
+  background: var(--mila-surface-2);
+  font-size: var(--mila-text-xs);
+  font-weight: 600;
+  color: var(--mila-slate);
+  white-space: nowrap;
 }
 
-.mila-log[hidden] {
-  display: none;
+.mila-status-chip[data-tone="ok"] {
+  border-color: color-mix(in srgb, var(--mila-ok) 32%, var(--mila-line));
+  background: var(--mila-ok-soft);
+  color: var(--mila-ok);
 }
+
+.mila-status-chip[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--mila-warn) 32%, var(--mila-line));
+  background: var(--mila-warn-soft);
+  color: var(--mila-warn);
+}
+
+.mila-status-chip[data-tone="bad"] {
+  border-color: color-mix(in srgb, var(--mila-danger) 32%, var(--mila-line));
+  background: var(--mila-danger-soft);
+  color: var(--mila-danger);
+}
+
+/* ── Skip link ──────────────────────────────────────────────────────────── */
+
+.mila-skip {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  z-index: 100;
+}
+
+.mila-skip:focus {
+  left: 0.75rem;
+  top: 0.75rem;
+  background: var(--mila-surface);
+  color: var(--mila-blue);
+  padding: 0.55rem 0.9rem;
+  border: 2px solid var(--mila-blue);
+  border-radius: var(--mila-radius-sm);
+  box-shadow: var(--mila-shadow);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+/* ── Shell grid ─────────────────────────────────────────────────────────── */
+
+.mila-main {
+  min-width: 0;
+}
+
+.mila-console {
+  display: grid;
+  grid-template-columns: 15.5rem minmax(0, 1fr);
+  align-items: start;
+}
+
+.mila-sidebar {
+  background: var(--mila-surface);
+  border-right: 1px solid var(--mila-line);
+  padding: 0.75rem 0.6rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.mila-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.mila-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: 0;
+  border-radius: var(--mila-radius-sm);
+  background: transparent;
+  color: var(--mila-slate);
+  font-family: inherit;
+  font-size: var(--mila-text-sm);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--mila-transition), color var(--mila-transition);
+}
+
+.mila-nav-item svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  flex: none;
+  color: var(--mila-muted);
+  transition: color var(--mila-transition);
+}
+
+.mila-nav-item .label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mila-nav-item:hover:not(.active) {
+  background: var(--mila-bg);
+  color: var(--mila-blue);
+}
+
+.mila-nav-item:hover:not(.active) svg {
+  color: var(--mila-blue);
+}
+
+.mila-nav-item.active {
+  background: var(--mila-blue-soft);
+  color: var(--mila-blue);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--mila-blue);
+}
+
+.mila-nav-item.active svg {
+  color: var(--mila-blue);
+}
+
+.mila-nav-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.3rem;
+  height: 1.3rem;
+  padding: 0 0.38rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: var(--mila-warn-soft);
+  color: var(--mila-warn);
+  font-variant-numeric: tabular-nums;
+}
+
+.mila-nav-badge[data-tone="bad"] {
+  background: var(--mila-danger-soft);
+  color: var(--mila-danger);
+}
+
+.mila-sidebar-foot {
+  margin-top: auto;
+  padding: 0.7rem 0.65rem 0.2rem;
+  border-top: 1px solid var(--mila-line);
+  color: var(--mila-muted);
+  font-size: var(--mila-text-xs);
+}
+
+.mila-content {
+  min-width: 0;
+  padding: 1.5rem;
+}
+
+.mila-panel {
+  min-width: 0;
+  animation: mila-panel-in 200ms ease;
+}
+
+@keyframes mila-panel-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ── Console error alert ────────────────────────────────────────────────── */
+
+.mila-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--mila-danger);
+  border-left: 4px solid var(--mila-danger);
+  border-radius: var(--mila-radius);
+  background: var(--mila-danger-soft);
+  color: var(--mila-danger);
+  font-size: var(--mila-text-sm);
+}
+
+/* ── Page header ────────────────────────────────────────────────────────── */
+
+.mila-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+.mila-page-head h2 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--mila-ink);
+  line-height: 1.15;
+}
+
+.mila-page-sub {
+  margin: 0.25rem 0 0;
+  color: var(--mila-muted);
+  font-size: var(--mila-text-sm);
+  max-width: 48rem;
+}
+
+.mila-page-head-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex: none;
+}
+
+/* ── Stat tiles ─────────────────────────────────────────────────────────── */
+
+.mila-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.mila-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 1rem 1.1rem;
+  background: var(--mila-surface);
+  border: 1px solid var(--mila-line);
+  border-radius: var(--mila-radius);
+  box-shadow: var(--mila-shadow-sm);
+}
+
+.mila-stat-label {
+  font-size: var(--mila-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--mila-muted);
+  font-weight: 600;
+}
+
+.mila-stat-value {
+  font-size: 1.5rem;
+  font-weight: 650;
+  color: var(--mila-ink);
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.mila-stat-sub {
+  font-size: var(--mila-text-xs);
+  color: var(--mila-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ── Service cards ──────────────────────────────────────────────────────── */
+
+.mila-service-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14.5rem), 1fr));
+  gap: 0.75rem;
+}
+
+.mila-service-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.85rem 1rem;
+  background: var(--mila-surface);
+  border: 1px solid var(--mila-line);
+  border-radius: var(--mila-radius);
+  box-shadow: var(--mila-shadow-sm);
+}
+
+.mila-service-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.mila-service-name {
+  font-weight: 600;
+  color: var(--mila-ink);
+  font-family: var(--mila-mono);
+  font-size: var(--mila-text-sm);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mila-service-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: var(--mila-text-xs);
+  color: var(--mila-muted);
+  min-width: 0;
+}
+
+.mila-service-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.mila-service-latency {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--mila-faint);
+}
+
+/* ── Persistence paths ──────────────────────────────────────────────────── */
+
+.mila-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  background: var(--mila-surface-2);
+  border: 1px solid var(--mila-line);
+  border-radius: var(--mila-radius);
+  padding: 0.6rem 1rem;
+}
+
+.mila-path-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  font-size: var(--mila-text-sm);
+  padding: 0.2rem 0;
+  flex-wrap: wrap;
+}
+
+.mila-path-key {
+  color: var(--mila-muted);
+  min-width: 8.5rem;
+  flex: none;
+}
+
+.mila-path-value {
+  font-family: var(--mila-mono);
+  font-size: 0.8rem;
+  color: var(--mila-ink);
+  word-break: break-all;
+  background: transparent;
+  padding: 0;
+}
+
+/* ── Quota cards ────────────────────────────────────────────────────────── */
 
 .quota-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  gap: 0.75rem;
 }
 
 .quota-card {
   padding: 1rem;
-  border: 1px solid #d9dce6;
-  border-radius: 8px;
-  background: white;
+  background: var(--mila-surface);
+  border: 1px solid var(--mila-line);
+  border-radius: var(--mila-radius);
+  box-shadow: var(--mila-shadow-sm);
 }
 
-.quota-card h3 { margin: 0 0 .75rem; }
-.quota-card label { display: block; margin-bottom: .75rem; font-size: .85rem; }
-.quota-card input { margin-top: .25rem; width: 100%; box-sizing: border-box; }
-.quota-card .mila-row { flex-wrap: wrap; }
-.mila-section { overflow-x: auto; }
+.quota-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  color: var(--mila-ink);
+}
+
+.quota-card label {
+  display: block;
+  margin-bottom: 0.7rem;
+  font-size: var(--mila-text-sm);
+  font-weight: 600;
+  color: var(--mila-slate);
+}
+
+.quota-card input {
+  margin-top: 0.3rem;
+}
+
+.quota-card .mila-row {
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.quota-status {
+  min-height: 1.3em;
+  margin-bottom: 0;
+}
+
+/* ── Log toolbar ────────────────────────────────────────────────────────── */
+
+.mila-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.mila-log-toolbar h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  flex: 1;
+}
+
+/* ── Login view (token gate) ────────────────────────────────────────────── */
+
+.mila-login-brand {
+  text-align: center;
+  margin-bottom: 0.6rem;
+}
+
+.mila-login-brand img {
+  height: 44px;
+  width: auto;
+}
+
+.mila-secret {
+  position: relative;
+  display: flex;
+}
+
+.mila-secret .mila-input {
+  padding-right: 2.75rem;
+}
+
+.mila-secret .mila-button {
+  position: absolute;
+  right: 0.3rem;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* ── Confirm dialog extra (checkbox row) ────────────────────────────────── */
+
+.mila-dialog-extra {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+  font-size: var(--mila-text-sm);
+  cursor: pointer;
+}
+
+.mila-dialog-extra input {
+  width: auto;
+  accent-color: var(--mila-blue);
+}
+
+/* ── Skeleton page ──────────────────────────────────────────────────────── */
+
+.mila-skeleton-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.mila-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr));
+  gap: 0.75rem;
+}
+
+/* ── Meters, states and chips (console interiors) ──────────────────────── */
+
+.mila-meter {
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--mila-line);
+  overflow: hidden;
+}
+
+.mila-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--mila-ok);
+  transition: width 320ms ease;
+}
+
+.mila-meter-fill.warn { background: var(--mila-warn); }
+.mila-meter-fill.bad { background: var(--mila-danger); }
+
+.mila-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.quota-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.15rem;
+}
+
+.quota-card-head h3 { margin: 0; }
+
+.quota-card-meta {
+  margin: 0 0 0.6rem;
+  color: var(--mila-muted);
+  font-size: var(--mila-text-xs);
+}
+
+.quota-meter-block { margin-bottom: 0.7rem; }
+
+.quota-meter-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.25rem;
+  font-size: var(--mila-text-sm);
+  font-weight: 600;
+  color: var(--mila-slate);
+}
+
+.quota-meter-label .numeric {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--mila-muted);
+}
+
+.mila-field-hint {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: var(--mila-text-xs);
+  color: var(--mila-faint);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-card[data-dirty="1"] {
+  border-color: var(--mila-warn);
+  box-shadow: var(--mila-shadow-sm), inset 0 0 0 1px var(--mila-warn);
+}
+
+.mila-callout {
+  padding: 0.7rem 0.9rem;
+  margin-bottom: 1rem;
+  border: 1px solid var(--mila-line);
+  border-left: 4px solid var(--mila-muted);
+  border-radius: var(--mila-radius);
+  background: var(--mila-surface-2);
+  font-size: var(--mila-text-sm);
+  color: var(--mila-slate);
+}
+
+.mila-callout.ok { border-left-color: var(--mila-ok); background: var(--mila-ok-soft); }
+.mila-callout.warn { border-left-color: var(--mila-warn); background: var(--mila-warn-soft); }
+.mila-callout.bad { border-left-color: var(--mila-danger); background: var(--mila-danger-soft); }
+
+.mila-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+}
+
+.mila-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--mila-line);
+  border-radius: 999px;
+  background: var(--mila-surface);
+  color: var(--mila-slate);
+  font-family: var(--mila-mono);
+  font-size: var(--mila-text-xs);
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background var(--mila-transition), color var(--mila-transition), border-color var(--mila-transition);
+}
+
+button.mila-chip:hover {
+  background: var(--mila-blue-soft);
+  border-color: var(--mila-blue);
+  color: var(--mila-blue);
+}
+
+.mila-chip code {
+  background: transparent;
+  padding: 0;
+  color: var(--mila-blue);
+}
+
+.mila-code-block {
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  background: #10131a;
+  color: #d8dee9;
+  border-radius: var(--mila-radius-sm);
+  font-family: var(--mila-mono);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 28rem;
+}
+
+.mila-countdown {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.mila-json {
+  margin: 0;
+  padding: 0.6rem;
+  background: var(--mila-surface-2);
+  border: 1px solid var(--mila-line);
+  border-radius: var(--mila-radius-sm);
+  font-family: var(--mila-mono);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--mila-ink);
+}
+
+.mila-audit-row { cursor: pointer; }
+
+.mila-audit-row td:first-child::before {
+  content: '›';
+  display: inline-block;
+  margin-right: 0.35rem;
+  color: var(--mila-muted);
+  transition: transform 120ms ease;
+}
+
+.mila-audit-row[aria-expanded="true"] td:first-child::before {
+  transform: rotate(90deg);
+}
+
+.mila-audit-detail td {
+  background: var(--mila-surface-2);
+  border-bottom: 1px solid var(--mila-line);
+}
+
+.mila-audit-query { flex: 1 1 16rem; max-width: 32rem; }
+
+.mila-audit-results { margin-top: 0.75rem; }
+
+.mila-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+
+.mila-log-card { margin: 0.75rem 0; }
+
+.mila-log-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.92rem;
+}
+
+.mila-failure-cell {
+  max-width: 16rem;
+  overflow-wrap: anywhere;
+  font-size: var(--mila-text-xs);
+  color: var(--mila-danger);
+}
+
+.mila-storage { margin-bottom: 0.9rem; }
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+
+@media (min-width: 1024px) {
+  .mila-header {
+    height: 3.75rem;
+    flex-wrap: nowrap;
+  }
+
+  .mila-sidebar {
+    position: sticky;
+    top: 3.75rem;
+    align-self: start;
+    max-height: calc(100vh - 3.75rem);
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 1023px) {
+  .mila-console {
+    display: block;
+  }
+
+  .mila-sidebar {
+    position: static;
+    border-right: 0;
+    border-bottom: 1px solid var(--mila-line);
+    padding: 0.5rem;
+    flex-direction: column;
+  }
+
+  .mila-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0.25rem;
+    padding-bottom: 0.15rem;
+    scrollbar-width: thin;
+  }
+
+  .mila-nav-item {
+    flex: 0 0 auto;
+    width: auto;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.45rem 0.7rem;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .mila-nav-item.active {
+    box-shadow: inset 0 -3px 0 var(--mila-blue);
+  }
+
+  .mila-sidebar-foot {
+    display: none;
+  }
+
+  .mila-content {
+    padding: 1rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .mila-header {
+    padding: 0.5rem 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .mila-header .mila-title-sub {
+    display: none;
+  }
+
+  .mila-page-head h2 {
+    font-size: 1.2rem;
+  }
+
+  .mila-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}

@@ -177,16 +177,29 @@ operator. Authorization stays local: the operator holds
 - The console never returns the master token or user keys; browser sessions are
   exposed only as 16-character SHA-256 handles of the cookie value.
 
-The UI is organised into tabs: **Vue d'ensemble**, **Utilisateurs & sessions**,
-**Quotas**, **Runtimes**, **Modèles disponibles**, **Modèles locaux**,
-**Approbations**, **Audit**, **Services** and **Matériel**. *Quotas* reads and
-writes the shared per-user limits through the auth gateway with the master
-bearer; *Runtimes* lists one row per provisioned user (running or stopped);
-*Modèles disponibles* shows the LiteLLM catalogue and flags whether inference is
-simulated or proxied; *Modèles locaux* registers, downloads and starts local
-HuggingFace models; *Matériel* renders the device/GPU/driver survey; *Services*
-offers start/stop/restart and refuses to manage the gateway itself (that stays a
-host operation).
+The UI is a Mila-branded console with a fixed sidebar (a horizontally
+scrollable icon rail below 1024 px), a topbar carrying the Mila logo, the
+gateway status chip, a last-updated clock, a refresh button, the operator
+identity and logout, and a hash-routed panel per section: **Vue d'ensemble**,
+**Utilisateurs & sessions**, **Quotas**, **Runtimes**, **Modèles disponibles**,
+**Modèles locaux**, **Approbations**, **Audit**, **Services** and **Matériel**.
+Deep links (`/admin#quotas`), browser back/forward, and roving-tabindex
+arrow/Home/End navigation with `aria-selected`/`tabpanel` wiring are supported;
+panels render with skeletons on first load only, and every mutation reports
+through a deduplicated toast stack plus a persistent inline alert. Destructive
+actions (password rotation, session revocation, model deletion, service
+stop/restart) confirm through a labelled `<dialog>` instead of `confirm()`;
+`prefers-reduced-motion` is honoured. *Quotas* reads and writes the shared
+per-user limits through the auth gateway with the master bearer and shows
+per-user usage meters (concurrency and daily tokens, consumed plus reserved);
+*Runtimes* lists one row per provisioned user (running or stopped) with a
+wrapped log viewer; *Modèles disponibles* shows the LiteLLM catalogue and flags
+whether inference is simulated or proxied; *Modèles locaux* registers,
+downloads and starts local HuggingFace models; *Approbations* counts down each
+pending request; *Audit* offers LogsQL quick queries and expandable raw events;
+*Matériel* renders the device/GPU/driver survey; *Services* offers
+start/stop/restart and refuses to manage the gateway itself (that stays a host
+operation). The gateway login page shares the same brand stylesheet.
 
 | Method | Path | Purpose | Backend call |
 |---|---|---|---|
