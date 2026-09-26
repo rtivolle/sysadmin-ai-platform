@@ -70,7 +70,7 @@ def test_restore_manager_tamper_detection_aborts(tmp_path):
     corrupt_staging = tmp_path / "corrupt_staging"
     corrupt_staging.mkdir()
     with tarfile.open(archive_path, "r:gz") as tar:
-        tar.extractall(corrupt_staging)
+        tar.extractall(corrupt_staging, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(corrupt_staging)
 
     root_dir = list(corrupt_staging.iterdir())[0]
     manifest_file = root_dir / "manifest.json"

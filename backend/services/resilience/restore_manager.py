@@ -105,7 +105,7 @@ class RestoreManager:
                     roots.add(path.parts[0])
                 if len(roots) != 1:
                     raise ValueError("Backup archive must contain one root directory")
-                tar.extractall(staging_dir)
+                tar.extractall(staging_dir, filter="data") if hasattr(tarfile, "data_filter") else tar.extractall(staging_dir)
 
             # Find extracted root directory
             extracted_subdirs = [p for p in staging_dir.iterdir() if p.is_dir()]
