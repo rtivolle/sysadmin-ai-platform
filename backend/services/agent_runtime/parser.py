@@ -13,13 +13,35 @@ class ParsedTurn:
     final_answer: Optional[str] = None
     error_message: Optional[str] = None
 
+# Optimization: Pre-compile regular expressions at module level to avoid
+# repeated compilation overhead on every turn of the agent reasoning loop.
+RE_FINAL_ANSWER = re.compile(r"Final Answer:\s*(.*)", flags=re.DOTALL | re.IGNORECASE)
+RE_ACTION = re.compile(r"Action:\s*([a-zA-Z0-9_\-]+)", flags=re.IGNORECASE)
+RE_THOUGHT_FA = re.compile(r"Thought:\s*(.*?)(?=Final Answer:)", flags=re.DOTALL | re.IGNORECASE)
+RE_THOUGHT_ACT = re.compile(r"Thought:\s*(.*?)(?=Action:)", flags=re.DOTALL | re.IGNORECASE)
+RE_ACTION_INPUT = re.compile(r"Action Input:\s*(.*)", flags=re.DOTALL | re.IGNORECASE)
+RE_CUT_OBSERVATION = re.compile(r"\n(?:Observation|Thought|Final Answer):", flags=re.IGNORECASE)
+RE_XML_TOOL_CALL = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", flags=re.DOTALL | re.IGNORECASE)
+
+RE_FENCE_START = re.compile(r"^```(?:json)?\s*", flags=re.IGNORECASE)
+RE_FENCE_END = re.compile(r"\s*```$")
+RE_UNESCAPED_BACKSLASH = re.compile(r'\\([^\/\\bfnrtu"0-9])')
+RE_TRAILING_COMMA = re.compile(r',\s*([}\]])')
+
 def clean_and_repair_json(raw_str: str) -> Dict[str, Any]:
     """Applies multiple heuristics to parse potentially malformed JSON."""
     s = raw_str.strip()
 
+    # Optimization: Fast path for well-formed JSON object or array to skip regex and string slicing
+    if s and s[0] in ("{", "["):
+        try:
+            return json.loads(s)
+        except Exception:
+            pass
+
     # 1. Strip markdown code fences
-    s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s*```$", "", s)
+    s = RE_FENCE_START.sub("", s)
+    s = RE_FENCE_END.sub("", s)
     s = s.strip()
 
     # 2. Extract substring between outermost braces if extra text exists
@@ -35,9 +57,9 @@ def clean_and_repair_json(raw_str: str) -> Dict[str, Any]:
         pass
 
     # 4. Repair unescaped regex backslashes (e.g. connect\(\) -> connect\\(\\))
-    repaired = re.sub(r'\\([^\/\\bfnrtu"0-9])', r'\\\\\1', s)
+    repaired = RE_UNESCAPED_BACKSLASH.sub(r'\\\\\1', s)
     # 5. Remove trailing commas before closing braces/brackets
-    repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+    repaired = RE_TRAILING_COMMA.sub(r'\1', repaired)
 
     try:
         return json.loads(repaired)
@@ -47,7 +69,7 @@ def clean_and_repair_json(raw_str: str) -> Dict[str, Any]:
     # 6. Single quotes to double quotes replacement (if python dict representation)
     try:
         sq_replaced = s.replace("'", '"')
-        sq_replaced = re.sub(r',\s*([}\]])', r'\1', sq_replaced)
+        sq_replaced = RE_TRAILING_COMMA.sub(r'\1', sq_replaced)
         return json.loads(sq_replaced)
     except Exception:
         pass
@@ -67,11 +89,11 @@ def parse_model_output(output_text: str, available_tools: List[str]) -> ParsedTu
     text = output_text.strip()
 
     # 1. Check for Final Answer marker
-    fa_match = re.search(r"Final Answer:\s*(.*)", text, flags=re.DOTALL | re.IGNORECASE)
-    act_match = re.search(r"Action:\s*([a-zA-Z0-9_\-]+)", text, flags=re.IGNORECASE)
+    fa_match = RE_FINAL_ANSWER.search(text)
+    act_match = RE_ACTION.search(text)
 
     if fa_match and (not act_match or fa_match.start() < act_match.start()):
-        thought_match = re.search(r"Thought:\s*(.*?)(?=Final Answer:)", text, flags=re.DOTALL | re.IGNORECASE)
+        thought_match = RE_THOUGHT_FA.search(text)
         thought = thought_match.group(1).strip() if thought_match else None
         final_answer = fa_match.group(1).strip()
         return ParsedTurn(type="final_answer", thought=thought, final_answer=final_answer)
@@ -79,14 +101,14 @@ def parse_model_output(output_text: str, available_tools: List[str]) -> ParsedTu
     # 2. Check for ReAct Action: <tool> and Action Input: <json>
     if act_match:
         tool_name = act_match.group(1).strip()
-        thought_match = re.search(r"Thought:\s*(.*?)(?=Action:)", text, flags=re.DOTALL | re.IGNORECASE)
+        thought_match = RE_THOUGHT_ACT.search(text)
         thought = thought_match.group(1).strip() if thought_match else None
 
-        input_match = re.search(r"Action Input:\s*(.*)", text, flags=re.DOTALL | re.IGNORECASE)
+        input_match = RE_ACTION_INPUT.search(text)
         raw_input = input_match.group(1).strip() if input_match else "{}"
 
         # If Observation or another Thought appears after Action Input, slice it off
-        cut_match = re.search(r"\n(?:Observation|Thought|Final Answer):", raw_input, flags=re.IGNORECASE)
+        cut_match = RE_CUT_OBSERVATION.search(raw_input)
         if cut_match:
             raw_input = raw_input[:cut_match.start()].strip()
 
@@ -116,7 +138,7 @@ def parse_model_output(output_text: str, available_tools: List[str]) -> ParsedTu
         pass
 
     # 4. Check for XML Tool Call tags: <tool_call>{...}</tool_call>
-    xml_match = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", text, flags=re.DOTALL | re.IGNORECASE)
+    xml_match = RE_XML_TOOL_CALL.search(text)
     if xml_match:
         try:
             tc_data = clean_and_repair_json(xml_match.group(1))
