@@ -909,4 +909,78 @@ class QuotaManager:
             if self.require_shared:
                 raise ConnectionError("Shared quota state unavailable") from exc
 
+    # --- Team / project scope admission (additive) -------------------------
+    #
+    # Optional second gate *after* the per-user quotas above: nothing in this
+    # file calls these methods and no existing method was changed to add them,
+    # so the per-user behaviour (2 in-flight, 60 RPM, 150k TPM, 2M daily) is
+    # byte-for-byte what it was. When a QuotaScopes store is attached (see
+    # attach_quota_scopes), callers — the ForwardAuth verify path and the
+    # LiteLLM admission path — may additionally admit against the team or
+    # project budget that owns the API key. Without an attached store every
+    # method below is a no-op returning None/False: per-user quotas still run.
+    #
+    # Wiring sketch (NOT done here; lives in server.py / litellm_auth.py at
+    # integration time — see docs/quota-aware-distribution.md § "Branchement"):
+    #
+    #     info = quota_mgr.check_scoped_token_budget("team", team_id, estimated_tokens)
+    #     ...
+    #     quota_mgr.record_scoped_usage("team", team_id, total_tokens, model=model)
+    #
+    # where team_id/project_id comes from the key's scope attachment (an
+    # operator-maintained mapping, e.g. Valkey `quota:scope-attachment:<user>`
+    # or KeyStore metadata — never from a client header).
+    def attach_quota_scopes(self, quota_scopes) -> None:
+        """Attach the durable team/project scope store. Unset by default."""
+        self._quota_scopes = quota_scopes
+
+    def _attached_scopes(self):
+        return getattr(self, "_quota_scopes", None)
+
+    def check_scoped_token_budget(
+        self,
+        scope_type: str,
+        scope_id: str,
+        estimated_tokens: int = 0,
+        quota_scopes=None,
+    ) -> Optional[Dict[str, Any]]:
+        """Admission check against a team/project budget.
+
+        Returns the budget info dict when admitted, None when no scope store
+        is attached (no-op). Raises QuotaExceededException when the budget is
+        exhausted — callers surface it as HTTP 429 exactly like the per-user
+        denials — and propagates ConnectionError when the store is required
+        but unreachable (fail-closed, HTTP 503).
+        """
+        scopes = quota_scopes if quota_scopes is not None else self._attached_scopes()
+        if scopes is None:
+            return None
+        admitted, info = scopes.check_budget(scope_type, scope_id, estimated_tokens)
+        if not admitted:
+            raise QuotaExceededException(
+                f"{scope_type}_tokens",
+                f"{scope_type} token budget exhausted for '{scope_id}' "
+                f"({info['used']:,}/{info['limit']:,} tokens).",
+                info["used"],
+                info["limit"],
+            )
+        return info
+
+    def record_scoped_usage(
+        self,
+        scope_type: str,
+        scope_id: str,
+        tokens: int,
+        model: Optional[str] = None,
+        team_id: Optional[str] = None,
+        quota_scopes=None,
+    ) -> bool:
+        """Durably charge ``tokens`` to a team/project scope. No-op (False)
+        when no scope store is attached; True when recorded."""
+        scopes = quota_scopes if quota_scopes is not None else self._attached_scopes()
+        if scopes is None:
+            return False
+        scopes.record_usage(scope_type, scope_id, tokens, model=model, team_id=team_id)
+        return True
+
 quota_mgr = QuotaManager()
