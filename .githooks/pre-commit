@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# pre-commit — garde-fou rapide (< ~10 s) sur les fichiers STAGÉS uniquement :
+#   1. scan de secrets sur les lignes ajoutées (bloquant) ;
+#   2. bash -n + shellcheck (si présent) sur les *.sh stagés ;
+#   3. compilation Python + ruff (si présent) sur les *.py stagés.
+# Faux positif ?  git commit --no-verify
+set -u
+
+HOOK_NAME="pre-commit"
+
+git rev-parse --git-dir >/dev/null 2>&1 || { echo "$HOOK_NAME: pas un dépôt git, ignoré" >&2; exit 0; }
+
+failed=0
+fail_msg() { printf '%s\n' "$*" >&2; failed=1; }
+warn_msg() { printf '%s: avertissement: %s\n' "$HOOK_NAME" "$*" >&2; }
+
+# Fichiers stagés (added / copied / modified — pas les suppressions).
+mapfile -d '' -t staged < <(git diff --cached --name-only --diff-filter=ACM -z)
+((${#staged[@]} == 0)) && exit 0
+
+# --- 1. Scan de secrets sur les lignes ajoutées ---------------------------
+# Motifs : clés AWS, tokens GitHub (ghp_/gho_), clés privées PEM/OpenSSH,
+# clés Stripe live/test, tokens Slack, et affectations password|passwd|
+# secret|api_key|token = <valeur> qui ne ressemblent pas à un placeholder.
+SECRET_RE='AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|gho_[A-Za-z0-9]{36}|-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|sk-(live|test)-[A-Za-z0-9_-]{10,}|xox[bap]-'
+ASSIGN_RE='(password|passwd|secret|api[_-]?key|token)[[:space:]]*[:=][[:space:]]*["'\'']?[^"'\''[:space:]]{6,}'
+PLACEHOLDER_RE='example|changeme|placeholder|your[-_]|xxx+|\*+|<[^>]*>|TODO|FIXME|os\.environ|getenv\(|\$\{|None|null'
+
+scan_added_lines() {
+    local f="$1" dl lineno body
+    lineno=0
+    while IFS= read -r dl; do
+        case "$dl" in
+            '@@ '*)
+                lineno=$(printf '%s' "$dl" | sed -n 's/^@@.*+\([0-9][0-9]*\).*/\1/p')
+                lineno=$((lineno - 1))
+                ;;
+            '+++'*) ;; # en-tête diff, pas une ligne ajoutée
+            '+'*)
+                lineno=$((lineno + 1))
+                body="${dl#+}"
+                if printf '%s\n' "$body" | grep -qE "$SECRET_RE"; then
+                    fail_msg "SECRET BLOQUÉ — $f:$lineno : motif de clé/token détecté"
+                    fail_msg "  > ${body:0:120}"
+                elif printf '%s\n' "$body" | grep -qiE "$ASSIGN_RE" \
+                  && ! printf '%s\n' "$body" | grep -qiE "$PLACEHOLDER_RE"; then
+                    fail_msg "SECRET BLOQUÉ — $f:$lineno : affectation suspecte (password/passwd/secret/api_key/token)"
+                    fail_msg "  > ${body:0:120}"
+                fi
+                ;;
+        esac
+    done < <(git diff --cached --no-ext-diff --unified=0 -- "$f")
+}
+
+for f in "${staged[@]}"; do
+    scan_added_lines "$f"
+done
+
+# --- 2 & 3. Vérifications syntaxe / lint ------------------------------------
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+have_shellcheck=0
+command -v shellcheck >/dev/null 2>&1 && have_shellcheck=1
+have_ruff=0
+command -v ruff >/dev/null 2>&1 && have_ruff=1
+
+n_sh=0
+n_py=0
+for f in "${staged[@]}"; do
+    case "$f" in
+        *.sh)
+            n_sh=$((n_sh + 1))
+            if ! git show ":$f" >"$tmpdir/check.sh" 2>/dev/null; then
+                warn_msg "impossible de lire le contenu stagé de $f — ignoré"
+                continue
+            fi
+            if ! bash -n "$tmpdir/check.sh" 2>"$tmpdir/bashn.err"; then
+                fail_msg "SYNTAXE BLOQUÉE — $f : bash -n échoue :"
+                fail_msg "$(sed 's/^/  /' "$tmpdir/bashn.err")"
+            elif [ "$have_shellcheck" = 1 ]; then
+                if ! shellcheck "$tmpdir/check.sh" >"$tmpdir/sc.out" 2>&1; then
+                    fail_msg "SHELLCHECK BLOQUÉ — $f :"
+                    fail_msg "$(sed 's/^/  /' "$tmpdir/sc.out")"
+                fi
+            else
+                warn_msg "shellcheck absent — vérification ignorée pour $f"
+            fi
+            ;;
+        *.py)
+            n_py=$((n_py + 1))
+            if ! git show ":$f" \
+                | python3 -c 'import sys; compile(sys.stdin.read(), sys.argv[1], "exec")' "$f" \
+                2>"$tmpdir/pyc.err"; then
+                fail_msg "SYNTAXE BLOQUÉE — $f : compilation Python échoue :"
+                fail_msg "$(sed 's/^/  /' "$tmpdir/pyc.err")"
+            elif [ "$have_ruff" = 1 ]; then
+                # ruff a besoin d'un vrai fichier : on rejoue le contenu stagé
+                # dans un fichier temporaire qui garde le basename d'origine.
+                rf="$tmpdir/ruff_${n_py}_$(basename "$f")"
+                git show ":$f" >"$rf" 2>/dev/null
+                if ! ruff check --no-cache "$rf" >"$tmpdir/ruff.out" 2>&1; then
+                    fail_msg "RUFF BLOQUÉ — $f :"
+                    fail_msg "$(sed 's/^/  /' "$tmpdir/ruff.out")"
+                fi
+            else
+                warn_msg "ruff absent — lint ignoré pour $f"
+            fi
+            ;;
+    esac
+done
+
+if [ "$failed" -ne 0 ]; then
+    printf '%s: ÉCHEC — commit refusé (voir ci-dessus).\n' "$HOOK_NAME" >&2
+    printf "Faux positif ? Contournement ponctuel : git commit --no-verify\n" >&2
+    exit 1
+fi
+printf '%s: OK (%d fichier(s) stagé(s) vérifié(s))\n' "$HOOK_NAME" "${#staged[@]}" >&2
+exit 0

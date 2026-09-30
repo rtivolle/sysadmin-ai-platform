@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# pre-push — vérification rapide avant push :
+#   1. make compile (ou python3 -m compileall en repli si le venv est absent) ;
+#   2. subset pytest rapide et hermétique (backend/tests/tier1_unit/test_githooks.py)
+#      UNIQUEMENT si le venv et pytest existent — sinon avertissement non bloquant.
+# Un environnement incomplet ne bloque JAMAIS le push ; un échec réel
+# (compile ou tests) le bloque. Contournement : git push --no-verify
+set -u
+
+HOOK_NAME="pre-push"
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || { echo "$HOOK_NAME: pas un dépôt git, ignoré" >&2; exit 0; }
+cd "$(git rev-parse --show-toplevel)" || exit 0
+
+warn_msg() { printf '%s: avertissement: %s\n' "$HOOK_NAME" "$*" >&2; }
+die() { printf '%s: ÉCHEC: %s\n' "$HOOK_NAME" "$*" >&2; exit 1; }
+
+# --- 1. Compilation ---------------------------------------------------------
+if [ -x backend/.venv/bin/python3 ] && [ -f Makefile ] && command -v make >/dev/null 2>&1; then
+    make compile >/dev/null 2>&1 || die "make compile a échoué"
+elif command -v python3 >/dev/null 2>&1; then
+    warn_msg "venv absent — compilation avec python3 système à la place de make compile"
+    python3 -m compileall -q backend/services backend/tests >/dev/null 2>&1 \
+        || die "python3 -m compileall backend/services backend/tests a échoué"
+else
+    warn_msg "ni venv ni python3 — étape compile ignorée"
+fi
+
+# --- 2. Subset pytest rapide et hermétique -----------------------------------
+PYVENV="backend/.venv/bin/python3"
+if [ -x "$PYVENV" ] && "$PYVENV" -m pytest --version >/dev/null 2>&1; then
+    "$PYVENV" -m pytest backend/tests/tier1_unit/test_githooks.py -q -p no:cacheprovider \
+        || die "le subset pytest (test_githooks.py) a échoué"
+else
+    warn_msg "venv ou pytest introuvable — tests ignorés (jamais bloquant sur env incomplet)"
+fi
+
+printf '%s: OK\n' "$HOOK_NAME" >&2
+exit 0
