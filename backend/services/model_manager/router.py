@@ -16,7 +16,8 @@ from fastapi import APIRouter, HTTPException, Request
 from services.agent_tools.audit import log_audit_event
 from services.auth_gateway.server import authenticate_request, role_for_user
 
-from . import downloader, llamacpp_server, litellm_sync, registry as registry_module, vllm_server
+from . import downloader, llamacpp_server, litellm_sync, promotion as promotion_module, registry as registry_module, vllm_server
+from services.control_store import open_fleet_registry
 from services.logging_setup import get_logger, log_event
 
 router = APIRouter()
@@ -512,3 +513,186 @@ def model_logs(name: str, request: Request, tail: int = 32768):
     _entry_or_404(name)
     tail = max(1024, min(int(tail), 262144))
     return {"name": name, "output": _server_for(_entry_or_404(name)).tail_log(name, tail)}
+
+
+# --- versioned rollout (staging -> canary -> prod) --------------------------
+
+def _fleet_or_503():
+    """Fail closed: promotion needs the durable control store, never a stub."""
+    fleet = open_fleet_registry()
+    if fleet is None:
+        raise HTTPException(status_code=503, detail="fleet control store unavailable")
+    return fleet
+
+
+def _promotion_error(reviewer, action, name, exc):
+    if isinstance(exc, ValueError) and "unknown" in str(exc):
+        _audit_failure(reviewer, action, {"name": name}, extra={"reason": "unknown", "error": str(exc)[:300]})
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit_failure(reviewer, action, {"name": name}, extra={"reason": "promotion_failed", "error": str(exc)[:300]})
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/v1/models/{name}/versions", status_code=201)
+async def register_model_version(name: str, request: Request):
+    """Record a new build of a model in the versioned rollout lifecycle."""
+    reviewer = require_admin(request)
+    try:
+        registry_module.validate_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    body = await request.json()
+    if not isinstance(body, dict):
+        _audit_failure(reviewer, "model_version_register", {"name": name}, extra={"reason": "invalid_body"})
+        raise HTTPException(status_code=400, detail="a JSON object is required")
+    try:
+        version = body.get("version")
+        hf_repo = body.get("hf_repo")
+        if not version or not hf_repo:
+            raise ValueError("version and hf_repo are required")
+        record = model_registry.register_version(
+            name,
+            version,
+            hf_repo,
+            revision=body.get("revision"),
+            engine=body.get("engine"),
+            stage=body.get("stage") or registry_module.STAGE_STAGING,
+        )
+    except (ValueError, TypeError) as exc:
+        _audit_failure(reviewer, "model_version_register", {"name": name},
+                       extra={"reason": "validation", "error": str(exc)[:300]})
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(reviewer, "model_version_register",
+           {"name": name, "version": record["version"], "stage": record["stage"]})
+    log_event(_LIFECYCLE_LOG, "model_version_registered",
+              f"version '{record['version']}' registered for '{name}'",
+              fields={"name": name, "version": record["version"], "stage": record["stage"]})
+    return {"model": name, "version": record}
+
+
+@router.get("/api/v1/models/{name}/versions")
+def list_model_versions(name: str, request: Request):
+    require_admin(request)
+    _entry_or_404(name)
+    return {"model": name, "versions": model_registry.list_versions(name),
+            "history": model_registry.promotion_history(name)}
+
+
+@router.post("/api/v1/models/{name}/promote")
+async def promote_model_version(name: str, request: Request):
+    """Move a version along the rollout chain and sync the fleet policy.
+
+    Body: {"version": "v2", "target_stage": "canary"|"prod"|..., "canary_percent": 10}.
+    Promoting to canary writes `canary_version`/`canary_traffic_percent` into
+    the model's fleet desired-state policy (read-modify-write); promoting to
+    prod clears them and records the prod version.
+    """
+    reviewer = require_admin(request)
+    try:
+        registry_module.validate_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    body = await request.json()
+    if not isinstance(body, dict):
+        _audit_failure(reviewer, "model_promote", {"name": name}, extra={"reason": "invalid_body"})
+        raise HTTPException(status_code=400, detail="a JSON object is required")
+    version = body.get("version")
+    target_stage = body.get("target_stage")
+    if not version or not target_stage:
+        _audit_failure(reviewer, "model_promote", {"name": name}, extra={"reason": "missing_fields"})
+        raise HTTPException(status_code=400, detail="version and target_stage are required")
+    canary_percent = body.get("canary_percent", 10)
+    if target_stage == registry_module.STAGE_CANARY:
+        try:
+            registry_module.validate_canary_percent(canary_percent)
+        except (ValueError, TypeError) as exc:
+            _audit_failure(reviewer, "model_promote", {"name": name, "version": version},
+                           extra={"reason": "validation", "error": str(exc)[:300]})
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        fleet = _fleet_or_503()
+    except HTTPException:
+        _audit_failure(reviewer, "model_promote", {"name": name, "version": version},
+                       extra={"reason": "fleet_unavailable"})
+        raise
+    try:
+        record = promotion_module.promote(
+            name, version, target_stage,
+            canary_percent=canary_percent,
+            registry=model_registry, fleet=fleet,
+        )
+    except (ValueError, TypeError, RuntimeError) as exc:
+        _promotion_error(reviewer, "model_promote", name, exc)
+    _audit(reviewer, "model_promote",
+           {"name": name, "version": version, "target_stage": record["stage"]})
+    log_event(_LIFECYCLE_LOG, "model_promoted",
+              f"version '{version}' of '{name}' -> {record['stage']}",
+              fields={"name": name, "version": version, "target_stage": record["stage"]})
+    return {"model": name, "version": record}
+
+
+@router.post("/api/v1/models/{name}/rollback")
+async def rollback_model(name: str, request: Request):
+    """Restore the previous prod version (from the promotion history)."""
+    reviewer = require_admin(request)
+    try:
+        registry_module.validate_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        fleet = _fleet_or_503()
+    except HTTPException:
+        _audit_failure(reviewer, "model_rollback", {"name": name}, extra={"reason": "fleet_unavailable"})
+        raise
+    try:
+        record = promotion_module.rollback(name, registry=model_registry, fleet=fleet)
+    except (ValueError, TypeError, RuntimeError) as exc:
+        _promotion_error(reviewer, "model_rollback", name, exc)
+    _audit(reviewer, "model_rollback", {"name": name, "version": record["version"]})
+    log_event(_LIFECYCLE_LOG, "model_rollback",
+              f"model '{name}' rolled back to '{record['version']}'",
+              fields={"name": name, "version": record["version"]})
+    return {"model": name, "version": record}
+
+
+@router.post("/api/v1/models/{name}/canary")
+async def set_canary_traffic(name: str, request: Request):
+    """Adjust the traffic share of the canary version (percent 0-100).
+
+    Body: {"version": "v2", "percent": 25}. The version must be in the canary
+    stage; the fleet policy keeps every other field it already had.
+    """
+    reviewer = require_admin(request)
+    try:
+        registry_module.validate_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    body = await request.json()
+    if not isinstance(body, dict):
+        _audit_failure(reviewer, "model_canary", {"name": name}, extra={"reason": "invalid_body"})
+        raise HTTPException(status_code=400, detail="a JSON object is required")
+    version = body.get("version")
+    percent = body.get("percent")
+    if not version or percent is None:
+        _audit_failure(reviewer, "model_canary", {"name": name}, extra={"reason": "missing_fields"})
+        raise HTTPException(status_code=400, detail="version and percent are required")
+    try:
+        registry_module.validate_canary_percent(percent)
+    except (ValueError, TypeError) as exc:
+        _audit_failure(reviewer, "model_canary", {"name": name, "version": version},
+                       extra={"reason": "validation", "error": str(exc)[:300]})
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        fleet = _fleet_or_503()
+    except HTTPException:
+        _audit_failure(reviewer, "model_canary", {"name": name, "version": version},
+                       extra={"reason": "fleet_unavailable"})
+        raise
+    try:
+        record = promotion_module.set_canary_traffic(
+            name, version, percent, registry=model_registry, fleet=fleet)
+    except (ValueError, TypeError, RuntimeError) as exc:
+        _promotion_error(reviewer, "model_canary", name, exc)
+    _audit(reviewer, "model_canary",
+           {"name": name, "version": version, "percent": record["canary_percent"]})
+    return {"model": name, "version": record}
