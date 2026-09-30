@@ -1,13 +1,22 @@
 # Sysadmin AI Platform
 
-A zero-Docker, on-premises sysadmin agent prototype for small operations teams.
-It gives authenticated users a bounded ReAct runtime, four read/validate tools,
-a human-in-the-loop approval gate, a Bubblewrap + cgroups v2 sandbox, per-user
-quotas, and a VictoriaLogs audit trail with a durable local outbox.
+A zero-Docker, on-premises **inference fleet management platform** with a
+bounded sysadmin agent on top. It serves teams from a fleet of GPU nodes —
+declarative desired state, human-gated node enrollment, dynamic LiteLLM
+routing — backed by a data tier (Valkey, SeaweedFS, VictoriaLogs, PostgreSQL
+control store) with per-user quotas, a human-in-the-loop approval gate and a
+full audit trail.
+
+The product direction is **Mila-scale inference and data management**: a
+multi-node GPU fleet that grows and shrinks without friction, and the data
+layer to run it like a service. The roadmap for what is still missing is
+honest and public — see [`docs/plans/MILA_ROADMAP.md`](docs/plans/MILA_ROADMAP.md).
 
 > **Status: prototype.** The target adapter and its privileged boundary are
-> implemented but **not qualified for production target changes**. The benchmark
-> suite and live smoke tests pass on the development host; see
+> implemented but **not qualified for production target changes**. The fleet
+> topology (platform + GPU nodes) is implemented and unit-tested but **never
+> run on real machines**. The benchmark suite and live smoke tests pass on the
+> development host; see
 > [`docs/status/TEST_READY.md`](docs/status/TEST_READY.md) for the exact scope
 > and remaining qualification work.
 
@@ -27,6 +36,10 @@ quotas, and a VictoriaLogs audit trail with a durable local outbox.
 ./sysadmin-chat
 ```
 
+That is the single-node install. For prerequisites, the `platform`/`inference`
+roles, GPU-node bring-up and post-install checks, read the installation guide:
+[`docs/INSTALL.md`](docs/INSTALL.md).
+
 Run `./install.sh --tui` for the configuration wizard, or `./install.sh --survey`
 for hardware inventory only. Stop everything with `./platform.sh stop`.
 
@@ -42,7 +55,7 @@ The CLI defaults to `SYSADMIN_USER=sysadmin-01`. Administrator commands use
 |---|---|
 | **Identity & auth** | Bearer tokens + PBKDF2 logins via ForwardAuth; `X-User`/`X-Forwarded-*` headers are stripped and re-validated from credentials. |
 | **Control store** | Optional PostgreSQL backend (`backend/services/control_store/`, ADR-0014) for durable token ledgers and API key lifecycles, surviving restarts. |
-| **Inference routing** | LiteLLM gateway with per-user virtual keys; local engine simulates unless `UPSTREAM_VLLM_URL` points at vLLM. |
+| **Inference routing** | LiteLLM gateway with per-user virtual keys. On a fleet, the `litellm_sync` daemon regenerates the LiteLLM `model_list` from the fleet registry (one entry per model × healthy node, least-busy routing); on `all` the local engine simulates unless `UPSTREAM_VLLM_URL` points at vLLM. |
 | **Quotas** | Per-user concurrency leases (2 in-flight, 6 during P1), RPM, TPM and daily token budgets with atomic reservation/settlement in Valkey; defaults are overridable per user by an administrator (`GET|POST /api/v1/admin/quotas`). |
 | **Agent runtime** | ReAct loop, session store, tool registry and parser in `backend/services/agent_runtime/`. |
 | **Bounded tools** | Streaming log search, Markdown runbook reader, JSON/YAML/systemd linter + unified diff, sandboxed shell. |
@@ -51,8 +64,8 @@ The CLI defaults to `SYSADMIN_USER=sysadmin-01`. Administrator commands use
 | **Audit** | Complete census across all user/agent actions to VictoriaLogs; local outbox fsyncs on failure; HMAC-chained audit anchor (`audit_anchor.py`). |
 | **Target adapter & executor** | Scoped allow-list of service actions and staged config deployment with hardened `target_executor` daemon under systemd sandboxing. |
 | **Observability** | Out-of-process metrics collector and threshold evaluator (`backend/services/observability/`), Prometheus text/scrape endpoint, 8 alert runbooks. |
-| **Machine roles** | Install-time role selection (`--role all|web|inference|data`) with fail-closed configuration rendering and firewall rulesets. |
-| **Model management** | Admin-only HuggingFace snapshot download plus local vLLM and llama.cpp servers per model; appears in `/v1/models` and LiteLLM. |
+| **Machine roles** | Install-time role selection (`--role all\|platform\|inference`) with fail-closed configuration rendering and firewall rulesets. The legacy three-machine split (`--role web\|data`) stays supported for compatibility. |
+| **Model management** | Admin-only HuggingFace snapshot download plus local vLLM and llama.cpp servers per model; appears in `/v1/models` and LiteLLM. On GPU nodes the node-agent owns the local lifecycle; the platform schedules placements from declarative desired state (replicas, GPU class, VRAM per replica) with human-approved node enrollment and drain/decommission. |
 | **Resilience & Update** | Backup/restore/DR drill, off-host backup sync (`offhost_backup.py`), and platform self-update engine (`update.sh`). |
 | **Harness integration** | Optional DeepSeek Harness profile, plugin and multi-user gateway in `packages/harness-integration/`. |
 
@@ -178,6 +191,7 @@ backlog and corrections.
 ## Documentation
 
 - Start here: [`AGENTS.md`](AGENTS.md)
+- Installation guide: [`docs/INSTALL.md`](docs/INSTALL.md)
 - System docs: [`docs/README.md`](docs/README.md)
 - Architecture: [`docs/architecture.md`](docs/architecture.md)
 - Security model: [`docs/security.md`](docs/security.md)
@@ -187,7 +201,9 @@ backlog and corrections.
 - Multi-host topology: [`docs/multi-host.md`](docs/multi-host.md)
 - Local observability: [`docs/observability.md`](docs/observability.md)
 - Model management: [`docs/model-management.md`](docs/model-management.md)
+- GPU fleet management: [`docs/gpu-fleet.md`](docs/gpu-fleet.md)
 - NVIDIA & vLLM setup: [`docs/nvidia-vllm.md`](docs/nvidia-vllm.md)
+- Mila roadmap (inference + data scale): [`docs/plans/MILA_ROADMAP.md`](docs/plans/MILA_ROADMAP.md)
 - Sovereignty & blocked egress: [`docs/sovereignty.md`](docs/sovereignty.md)
 - Architectural Decision Records: [`docs/decisions/README.md`](docs/decisions/README.md)
 - Testing: [`docs/testing.md`](docs/testing.md)

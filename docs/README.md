@@ -33,6 +33,7 @@ requirement specifications:
 | [http-api.md](http-api.md) | Every HTTP endpoint exposed by the platform. |
 | [tools.md](tools.md) | Reference for the four bounded sysadmin tools. |
 | [operations.md](operations.md) | Install, start, stop, CLI usage, logs, dashboards and troubleshooting. |
+| [INSTALL.md](INSTALL.md) | Installation guide: prerequisites, machine roles, single-node and fleet-split installs, GPU/NVIDIA setup, post-install verification, troubleshooting. |
 | [update.md](update.md) | Platform self-update (`update.sh`): fast-forward/overlay module updates, options, invariants and rollback. |
 | [multi-host.md](multi-host.md) | One machine or a three-machine split (web/inference/data): choosing the role, staged bring-up, key copy, firewall, verification checklist. |
 | [configuration.md](configuration.md) | Configuration files, environment variables, ports and paths. |
@@ -49,6 +50,7 @@ requirement specifications:
 | [glossary.md](glossary.md) | Terms and abbreviations used across the project. |
 | [specs/](specs/README.md) | The six source specifications and the code that implements each. |
 | [plans/DEVELOPMENT_PLAN.md](plans/DEVELOPMENT_PLAN.md) | Implementation baseline, backlog and corrections. |
+| [plans/MILA_ROADMAP.md](plans/MILA_ROADMAP.md) | Gap analysis and prioritized roadmap for Mila-scale inference-fleet and data management. |
 | [plans/PRODUCTION_READINESS.md](plans/PRODUCTION_READINESS.md) | Prioritized roadmap from prototype to production: work items, acceptance criteria, status tracking. |
 | [plans/MULTI_HOST_DEPLOYMENT.md](plans/MULTI_HOST_DEPLOYMENT.md) | Three-machine topology design (web/inference/data): placement, firewall matrices, secret distribution, setup prompts. |
 | [status/TEST_READY.md](status/TEST_READY.md) | Current verification results, environment limits and host notes. |
@@ -58,9 +60,9 @@ requirement specifications:
 
 ## Reading paths
 
-- **Operator / sysadmin** — start with [operations.md](operations.md), then
-  [update.md](update.md), [multi-host.md](multi-host.md), [observability.md](observability.md),
-  [tools.md](tools.md), then [security.md](security.md).
+- **Operator / sysadmin** — start with [INSTALL.md](INSTALL.md), then
+  [operations.md](operations.md), [update.md](update.md), [multi-host.md](multi-host.md),
+  [observability.md](observability.md), [tools.md](tools.md), then [security.md](security.md).
 - **Reviewer / security** — [architecture.md](architecture.md),
   [security.md](security.md), [sovereignty.md](sovereignty.md), [testing.md](testing.md),
   [decisions/README.md](decisions/README.md).
