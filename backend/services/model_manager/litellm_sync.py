@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from typing import Any, Callable, Dict, Optional
 
 import yaml
@@ -176,12 +177,62 @@ def _restart_litellm(run_fn=None, platform_sh=None) -> Dict[str, Any]:
         return {"exit_code": None, "error": str(exc)}
 
 
+# --- fleet restart anti-flap -------------------------------------------------
+# A flapping node must not restart the LiteLLM proxy on every sync cycle
+# (each restart is seconds of proxy downtime). Restarts are therefore
+# rate-limited: at most one per ``restart_cooldown_s``. A restart that arrives
+# inside the window is deferred, not dropped — it fires on the first later
+# call once the window has elapsed and the config is stable.
+#
+# Module-level on purpose: the litellm_sync daemon is long-lived. A process
+# restart conservatively resets the window and allows one immediate restart.
+RESTART_COOLDOWN_DEFAULT_S = 90.0
+_last_fleet_restart_ts: float = 0.0
+_fleet_restart_pending: bool = False
+
+
+def _reset_restart_tracking() -> None:
+    """Test helper: clear the anti-flap restart state."""
+    global _last_fleet_restart_ts, _fleet_restart_pending
+    _last_fleet_restart_ts = 0.0
+    _fleet_restart_pending = False
+
+
+def _maybe_restart_litellm(
+    changed: bool,
+    *,
+    cooldown_s: float,
+    run_fn=None,
+    platform_sh=None,
+) -> Any:
+    """Restart LiteLLM honouring the anti-flap cooldown.
+
+    Returns the restart report dict, the string ``"deferred"`` when a needed
+    restart is held back by the cooldown, or None when no restart was due.
+    """
+    global _last_fleet_restart_ts, _fleet_restart_pending
+    now = time.monotonic()
+    if changed:
+        if now - _last_fleet_restart_ts >= cooldown_s:
+            _last_fleet_restart_ts = now
+            _fleet_restart_pending = False
+            return _restart_litellm(run_fn=run_fn, platform_sh=platform_sh)
+        _fleet_restart_pending = True
+        return "deferred"
+    if _fleet_restart_pending and now - _last_fleet_restart_ts >= cooldown_s:
+        _last_fleet_restart_ts = now
+        _fleet_restart_pending = False
+        return _restart_litellm(run_fn=run_fn, platform_sh=platform_sh)
+    return None
+
+
 def sync_from_fleet(
     placements,
     config_path: Optional[str] = None,
     restart: bool = True,
     run_fn: Optional[Callable[[list, str], Any]] = None,
     platform_sh: Optional[str] = None,
+    restart_cooldown_s: float = RESTART_COOLDOWN_DEFAULT_S,
 ) -> Dict[str, Any]:
     """Rewrite the fleet-managed model_list block from healthy placements.
 
@@ -194,6 +245,10 @@ def sync_from_fleet(
     Only entries tagged ``model_info.managed_by = "sysadmin-fleet-manager"``
     are rewritten; hand-written entries and the local model manager's own
     block (``"sysadmin-model-manager"``) are preserved byte-for-byte.
+
+    ``restart_cooldown_s`` rate-limits LiteLLM restarts (anti-flap): at most
+    one restart per window; a restart that arrives inside the window is
+    deferred until the config is stable, never dropped.
     """
     path = config_path or default_config_path()
     with open(path, "r", encoding="utf-8") as handle:
@@ -227,8 +282,9 @@ def sync_from_fleet(
         _atomic_write_yaml(path, config)
 
     result: Dict[str, Any] = {"changed": changed, "models": by_model, "restart": None}
-    if changed and restart:
-        result["restart"] = _restart_litellm(run_fn=run_fn, platform_sh=platform_sh)
+    if restart:
+        result["restart"] = _maybe_restart_litellm(
+            changed, cooldown_s=restart_cooldown_s, run_fn=run_fn, platform_sh=platform_sh)
     return result
 
 

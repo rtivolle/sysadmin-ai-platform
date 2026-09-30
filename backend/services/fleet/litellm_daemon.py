@@ -7,11 +7,14 @@ Every ``FLEET_SYNC_INTERVAL_S`` seconds (default 10):
 2. read declarative policies (``fleet_desired_state``) and healthy nodes,
 3. schedule placements (bin-packing on free VRAM + ``gpu_class``),
 4. push each node's desired-state delta through its heartbeat endpoint
-   (mTLS), collecting actual state,
+   (mTLS) concurrently, collecting actual state — a successful push IS the
+   node's registry heartbeat (recorded so ``mark_stale`` cannot evict live
+   nodes),
 5. record placements (desired vs actual) in the registry,
 6. regenerate LiteLLM's ``model_list`` from healthy (model × node) pairs via
    ``litellm_sync.sync_from_fleet`` — which restarts LiteLLM through
-   ``platform.sh`` only when the generated block actually changed.
+   ``platform.sh`` only when the generated block actually changed, and at
+   most once per anti-flap cooldown window.
 
 The loop is built around ``sync_once()`` with injectable ``heartbeat_fn`` /
 ``sync_fn`` / ``run_fn`` so the whole control cycle is testable without
@@ -25,6 +28,7 @@ import os
 import signal
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
@@ -49,6 +53,15 @@ _LOG = get_logger("fleet.litellm_daemon")
 SYNC_INTERVAL_S = float(os.getenv("FLEET_SYNC_INTERVAL_S", "10"))
 STALE_AFTER_S = 30.0
 NODE_AGENT_PORT = int(os.getenv("FLEET_NODE_PORT", "8001"))
+
+
+def _heartbeat_workers() -> int:
+    """Concurrency for the per-node heartbeat push; override with
+    ``FLEET_HEARTBEAT_WORKERS``."""
+    try:
+        return max(1, int(os.getenv("FLEET_HEARTBEAT_WORKERS", "8")))
+    except (TypeError, ValueError):
+        return 8
 
 _shutdown = False
 
@@ -154,24 +167,62 @@ def sync_once(
     version = int(time.time())
     litellm_placements: List[Tuple[str, str]] = []
     node_errors: Dict[str, str] = {}
+
+    # Phase 1 — build each node's desired payload (pure, sequential).
+    pending: List[Tuple[str, str, Dict[str, Dict[str, Any]]]] = []
     for node in nodes:
         name = node["name"]
         address = node.get("address")
+        if not address:
+            node_errors[name] = "no address recorded"
+            continue
         node_desired = to_node_desired(assignments.get(name, []))
         for model in previously_running.get(name, set()):
             if model not in node_desired:
                 node_desired[model] = {"action": "stop", "params": {}}
+        pending.append((name, address, node_desired))
+
+    # Phase 2 — push the heartbeat to every node concurrently. The old
+    # sequential loop serialized the 30 s per-node timeout, so a single dead
+    # node stretched a cycle into minutes; the cycle is now bounded by one
+    # timeout no matter how many nodes flap.
+    replies: Dict[str, Dict[str, Any]] = {}
+    if pending:
+        workers = min(_heartbeat_workers(), len(pending))
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="fleet-hb") as pool:
+            future_to_name = {
+                pool.submit(heartbeat_fn, name, address, desired, version): name
+                for name, address, desired in pending
+            }
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    reply = future.result()
+                except Exception as exc:
+                    node_errors[name] = str(exc)[:200]
+                    log_event(_LOG, "node_heartbeat_failed",
+                              f"heartbeat push failed for '{name}'",
+                              fields={"node": name, "error": str(exc)[:200]},
+                              level=logging.WARNING)
+                    continue
+                if not isinstance(reply, dict):
+                    node_errors[name] = "node-agent heartbeat reply was not a JSON object"
+                    continue
+                replies[name] = reply
+
+    # Phase 3 — process the replies sequentially so every registry write
+    # stays single-threaded. A successful push IS the node's heartbeat: it
+    # must be recorded, otherwise mark_stale() evicts every node 30 s after
+    # approval and the fleet drains itself of traffic.
+    for name, address, node_desired in pending:
+        if name in node_errors:
+            continue
+        reply = replies.get(name)
+        if reply is None:
+            node_errors[name] = "no heartbeat reply recorded"
+            continue
         actual_models: Dict[str, str] = {}
-        if not address:
-            node_errors[name] = "no address recorded"
-            continue
-        try:
-            reply = heartbeat_fn(name, address, node_desired, version)
-        except Exception as exc:
-            node_errors[name] = str(exc)[:200]
-            log_event(_LOG, "node_heartbeat_failed", f"heartbeat push failed for '{name}'",
-                      fields={"node": name, "error": str(exc)[:200]}, level=logging.WARNING)
-            continue
         for model in (reply.get("actual") or {}).get("models", []):
             if not isinstance(model, dict):
                 continue
@@ -180,6 +231,18 @@ def sync_once(
             actual_models[model_name] = "running" if running else "stopped"
             if running:
                 litellm_placements.append((model_name, address))
+        try:
+            alive = registry.heartbeat(name, {"models": actual_models})
+        except Exception as exc:
+            node_errors[name] = f"heartbeat record failed: {exc}"[:200]
+            log_event(_LOG, "node_heartbeat_record_failed",
+                      f"could not record heartbeat for '{name}': {exc}",
+                      fields={"node": name, "error": str(exc)[:200]},
+                      level=logging.ERROR)
+            continue
+        if not alive:
+            node_errors[name] = "node unknown to the registry"
+            continue
         for model, spec in node_desired.items():
             registry.record_placement(model, name, {
                 "desired": "running" if spec.get("action") == "start" else "stopped",

@@ -1,17 +1,24 @@
 # Operator-owned vLLM native configuration. Restart models after editing.
 # Registry values override these defaults. Host/port/model/name are platform-owned.
+#
+# Throughput-oriented defaults (fleet profile): tuned for concurrent
+# multi-user serving on datacenter GPUs. Qualify with `vllm bench` in the lab
+# before changing per-model values; lower them back if TTFT SLOs regress.
 dtype: auto
 tensor-parallel-size: 1
 pipeline-parallel-size: 1
-gpu-memory-utilization: 0.85
+gpu-memory-utilization: 0.90
 max-model-len: 8192
-max-num-seqs: 32
-max-num-batched-tokens: 8192
+max-num-seqs: 128
+max-num-batched-tokens: 16384
 kv-cache-dtype: auto
 enable-prefix-caching: true
 enable-chunked-prefill: true
 enforce-eager: false
 trust-remote-code: false
+# Hopper-only (H100/H200) throughput options — validate per model in the lab:
+# kv-cache-dtype: fp8_e4m3   # ~2x KV cache capacity, near-identical quality
+# quantization: fp8          # ~1.5-1.9x throughput, <1% quality delta (no calibration)
 # Model-specific examples: enable only when supported by your model/vLLM version.
 # quantization: awq
 # tool-call-parser: hermes
