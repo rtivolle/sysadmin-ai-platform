@@ -104,6 +104,14 @@ daemon pushes `{model: {action: start|stop, params}}` deltas to the nodes.
 
 **Removing**: `POST …/drain` (node stops new models, finishes running ones, confirms `drained`) → `POST …/decommission` (status `retired`, revoke the certificate) → power off. No manual config edit on the platform at any point.
 
+## Cost tracking (chargeback)
+
+GPU cost accrues per node into `gpu_cost_ledger` (`CostTracker.accrue`), is
+attributed to models at token prorata (replica-count fallback) and rolls up
+to teams via the `team_id` of the `fleet_desired_state` policies; served at
+`GET /api/v1/fleet/costs/summary` (admin only, fail-closed 503).
+Cost model, limits and price calibration: `docs/fleet-cost-tracking.md`.
+
 ## Open / not in Phase A
 
 - Platform-side `register`/`heartbeat` receiver (node → platform push) — currently the platform polls the node-agent; see the design note in `services/node_agent/server.py`.

@@ -27,6 +27,8 @@ from services.agent_runtime.router import router as agent_router
 from services.target_adapter.router import router as target_adapter_router
 from services.model_manager.router import router as model_manager_router
 from services.fleet.router import router as fleet_router
+from services.fleet.quota_router import router as fleet_quota_router
+from services.fleet.cost_router import router as fleet_cost_router
 from services.agent_runtime.workspace import ensure_workspace
 from services.auth_gateway.server import authenticate_request, role_for_user
 from services.hardware_survey import run_hardware_survey
@@ -53,6 +55,10 @@ SYSADMIN_ROLE = os.getenv("SYSADMIN_ROLE", "all").strip().lower()
 if SYSADMIN_ROLE in ("all", "platform"):
     # Mount fleet admin API (approve/drain/decommission/list/health)
     app.include_router(fleet_router)
+    # Mount quota-aware distribution API (team/project quotas, chargeback)
+    # and GPU cost tracking API — same role gate, same admin auth.
+    app.include_router(fleet_quota_router)
+    app.include_router(fleet_cost_router)
 if SYSADMIN_ROLE == "all":
     # Mount local model lifecycle router (admin-only)
     app.include_router(model_manager_router)

@@ -2,6 +2,36 @@
 
 Last checked: 2026-09-25. Run tests with `backend/.venv/bin/python3 -m pytest -q` from the repository root.
 
+## LiteLLM reload / routing_weights / canary — feature/gpu-fleet-management (2026-09-30)
+
+- `backend/services/model_manager/litellm_sync.py`: new `reload_config()`
+  (hot-reload attempt via `POST /config/update` only when explicitly enabled,
+  restart through `platform.sh` otherwise/as fallback), `routing_weights`
+  kwarg on `sync_from_fleet()` (`{model: [{"node", "weight"}]}`, validated,
+  `None` = byte-identical output), `{model}-canary` entries from
+  `canary_policies` + `node_versions` (canary nodes excluded from the stable
+  pool; traffic percent enforced upstream). Opt-in `hot_reload` kwarg on
+  `sync()`/`sync_from_fleet()`; restart fallback keeps the anti-flap
+  cooldown. Full write-up: `docs/litellm-reload-canary.md`.
+- Hot-reload qualification (source inspection of litellm **1.103.1**, the
+  `install.sh` artifact): **no hot-reload of the YAML `model_list` exists in
+  config-only mode** — `/config/update` raises `No DB Connected` without
+  prisma (`proxy_server.py:17206`), no SIGHUP handler, no file watcher, the
+  periodic jobs only sync from DB. Not measured: live-proxy behaviour (no
+  proxy on this host) — lab checklist in the doc.
+- `routing_weights` constraint (verified in 1.103.1 sources): the router
+  honours `litellm_params.weight` **only under `simple-shuffle`**; the
+  shipped config uses `least-busy`, where weights are accepted but ignored —
+  strategy decision still open.
+- Measured (scratch venv, 2026-09-30): new
+  `backend/tests/tier1_unit/test_litellm_reload_canary.py` **23 passed**;
+  `test_fleet_control_loop.py` + `test_fleet_integration.py` + new file:
+  **37 passed**. `test_model_manager.py`: 10 failures **pre-existing in this
+  environment** (identical count with pristine `litellm_sync.py`;
+  httpx/TestClient URL-parsing mismatch in the scratch venv, unrelated).
+- Open: canary topology to reconcile with `docs/model-promotion.md` §4
+  (dedicated canary nodes, as implemented here, vs same-node dual serving).
+
 ## GPU fleet management — feature/gpu-fleet-management (2026-09-30)
 
 - **Documentation lane (this entry, no code).** Recorded the design decisions
@@ -615,3 +645,61 @@ This is not a production acceptance certificate. The scoped target adapter and s
 - Not measured here: a live `./update.sh` run against the real platform stack
   with running services (the restart path is covered by fixtures only), and
   `--binaries` re-download on this host (network download of pinned binaries).
+
+## 2026-09-30 — Quota-aware inference distribution (feature/gpu-fleet-management)
+
+Six parallel workstreams implementing the Mila-scale inference distribution
+system, quota-bounded end to end:
+
+- **Quota-aware distribution** (`control_store/quota_scopes.py`,
+  `fleet/distribution.py`, `fleet/quota_router.py`, additive
+  `auth_gateway/quota_manager.py` hooks): durable team/project quota scopes
+  (PostgreSQL, fail-closed), `quota_weights()` routing producer — exhausted
+  team → weight 0 unless it would drain the model (epsilon 1e-6, never a hard
+  outage), 429 + `Retry-After` on quota check, chargeback estimates.
+- **Autoscaling** (`fleet/autoscaler.py` + `litellm_daemon.py` integration):
+  `decide()` from queue depth / TTFT p99 / latency p99, min/max per model,
+  quota headroom as a hard ceiling (team dry → freeze at current replicas),
+  300 s up / 900 s down cooldowns in `autoscale_events`, `FLEET_AUTOSCALE_ENABLED`
+  (default on), failures degrade to no-op — the converge loop never breaks.
+- **Model registry + promotion** (`model_manager/registry.py`,
+  `promotion.py`, router): versioned models, staging→canary→prod machine,
+  canary traffic %, rollback via append-only history, admin endpoints.
+- **LiteLLM reload** (`model_manager/litellm_sync.py`): hot-reload qualified
+  against litellm 1.103.1 sources — **no reliable config-only hot reload**
+  (no SIGHUP, no file watcher, `/config/update` needs a DB); `reload_config()`
+  tries the hot path only when explicitly enabled, otherwise restarts via
+  `platform.sh` (anti-flap preserved). `routing_weights` supported; note:
+  the `least-busy` strategy ignores `weight` — `simple-shuffle` would be
+  needed to activate weighted routing (decision open). `{model}-canary`
+  entries with stable-pool isolation.
+- **Advanced scheduling** (`fleet/scheduler.py`): priorities, node-affinity
+  labels, cautious preemption (`never` default). Proven: with priority-ordered
+  placement, intra-pass preemption is unreachable — priority ordering already
+  yields the intended outcome; the eviction machinery is implemented per
+  contract with audit records.
+- **GPU cost tracking** (`fleet/cost_tracker.py`, `cost_router.py`,
+  `config/fleet/gpu_pricing.yaml`): per-class USD/hour pricing (operator-
+  configurable), idempotent accrual, token-prorata attribution to models/teams
+  (replica-prorata fallback), admin summary API.
+- New routers (`quota_router`, `cost_router`) mounted in
+  `agent_tools/server.py` under the same `all`/`platform` role gate as the
+  fleet router; daemon passes `canary_policies` (from desired-state) to
+  `sync_from_fleet` (`node_versions` pending node-agent version reporting).
+
+- Measured (this host, no GPU, scratch venv /tmp/final-venv, 2026-09-30):
+  **195 new tests passed** (cost 21, quota scopes 23, distribution 14, quota
+  router 8, quota admission 7, autoscaler 34, autoscale integration 19,
+  promotion 31, litellm reload/canary 23, scheduler advanced 19).
+  Full `tier1_unit`: **738 passed, 27 failed, 5 skipped** — the 27 failures
+  are byte-identical on pristine HEAD `b70e9ac` (verified via worktree diff):
+  pre-existing environment issues (httpx/TestClient mismatch, root-user and
+  TUI tests), none related to these changes.
+- Benchmarks (`backend/benchmarks/fleet_distribution_bench.py`, pure
+  functions): scheduler 0.05 ms (2n/2m) → 4.27 ms (32n/16m); quota_weights
+  ≤ 0.06 ms; autoscaler.decide ≤ 0.03 ms — control plane is not the bottleneck
+  (10 s control cycle).
+- Not measured here (lab qualification): real 2-node bring-up, vLLM serving
+  signals for autoscaler thresholds, `/config/update` behaviour on a live
+  proxy, node-agent version reporting for canary, `simple-shuffle` vs
+  `least-busy` traffic split, cost ledger vs real invoices.

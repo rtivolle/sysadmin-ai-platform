@@ -6,20 +6,26 @@ Every ``FLEET_SYNC_INTERVAL_S`` seconds (default 10):
 1. sweep stale nodes (3 missed heartbeats),
 2. read declarative policies (``fleet_desired_state``) and healthy nodes,
 3. schedule placements (bin-packing on free VRAM + ``gpu_class``),
-4. push each node's desired-state delta through its heartbeat endpoint
+4. autoscale (when ``FLEET_AUTOSCALE_ENABLED``): read serving metrics, run
+   ``autoscaler.decide`` and write adjusted ``replicas`` back through
+   ``registry.set_desired_state`` — the change converges on the *next* cycle —
+   then compute quota-aware routing weights for the LiteLLM sync,
+5. push each node's desired-state delta through its heartbeat endpoint
    (mTLS) concurrently, collecting actual state — a successful push IS the
    node's registry heartbeat (recorded so ``mark_stale`` cannot evict live
    nodes),
-5. record placements (desired vs actual) in the registry,
-6. regenerate LiteLLM's ``model_list`` from healthy (model × node) pairs via
+6. record placements (desired vs actual) in the registry,
+7. regenerate LiteLLM's ``model_list`` from healthy (model × node) pairs via
    ``litellm_sync.sync_from_fleet`` — which restarts LiteLLM through
    ``platform.sh`` only when the generated block actually changed, and at
    most once per anti-flap cooldown window.
 
 The loop is built around ``sync_once()`` with injectable ``heartbeat_fn`` /
-``sync_fn`` / ``run_fn`` so the whole control cycle is testable without
-nodes, LiteLLM or a database. Fail-closed: with no durable store configured
-nothing is synced — the outage is logged loudly, never papered over.
+``sync_fn`` / ``run_fn`` / ``metrics_fn`` so the whole control cycle is
+testable without nodes, LiteLLM or a database. Fail-closed: with no durable
+store configured nothing is synced — the outage is logged loudly, never
+papered over. Autoscaling additionally fails safe: with no metrics it takes
+no action, and it never scales past the quota headroom.
 
 Graceful shutdown on SIGTERM/SIGINT.
 """
@@ -46,6 +52,7 @@ from services.control_store.fleet_registry import FleetRegistry
 from services.logging_setup import configure, get_logger, log_event
 from services.model_manager import litellm_sync
 
+from . import autoscaler
 from .scheduler import compute_desired_state, shortfall, to_node_desired
 
 _LOG = get_logger("fleet.litellm_daemon")
@@ -130,6 +137,94 @@ def _free_vram(nodes: List[Dict[str, Any]], policies: Dict[str, Dict[str, Any]],
     return free
 
 
+def _autoscale_enabled() -> bool:
+    """Kill-switch for desired-state autoscaling; default on.
+
+    Read per cycle (not at import) so tests and operators can flip it
+    without restarting the import machinery.
+    """
+    return os.getenv("FLEET_AUTOSCALE_ENABLED", "1").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+def _run_autoscale(
+    registry: FleetRegistry,
+    policies: Dict[str, Dict[str, Any]],
+    assignments: Dict[str, List[Dict[str, Any]]],
+    metrics_fn: Optional[Callable[[], Dict[str, Dict[str, Any]]]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, list]]]:
+    """One autoscale pass: metrics -> decide -> write replicas -> weights.
+
+    Returns ``(info, routing_weights)``. ``policies`` is updated in place for
+    the models whose replica count changed (the registry write is the durable
+    record; the scheduler converges on the next cycle). Raises on registry
+    errors — the caller logs and continues the converge loop without the
+    autoscale pass.
+    """
+    info: Dict[str, Any] = {"enabled": True, "decisions": {},
+                            "metrics_models": 0, "routing_weights": False}
+    metrics = (metrics_fn or autoscaler.read_fleet_metrics)()
+    if not isinstance(metrics, dict):
+        metrics = {}
+    info["metrics_models"] = len(metrics)
+
+    # Durable cooldown ledger. A stub registry (tests) has no executor —
+    # cooldowns are then unenforced for that cycle, which is fine because
+    # the decisions are still bounded by min/max/quota.
+    executor = getattr(registry, "_executor", None)
+    quota_scopes = autoscaler.maybe_quota_scopes(executor)
+    headroom = autoscaler.resolve_quota_headroom(policies, quota_scopes)
+    if executor is not None:
+        autoscaler.ensure_schema(executor)
+        last_scales = autoscaler.load_last_scales(executor)
+    else:
+        last_scales = {}
+
+    decisions = autoscaler.decide(policies, metrics, headroom,
+                                  time.time(), last_scales)
+
+    set_desired_state = getattr(registry, "set_desired_state", None)
+    if decisions and set_desired_state is None:
+        # Fail safe: never scale when the new replica count cannot be
+        # persisted — an in-memory-only change would desync the fleet.
+        log_event(_LOG, "autoscale_no_write_path",
+                  "autoscale decisions dropped: registry has no set_desired_state",
+                  fields={"decisions": decisions}, level=logging.WARNING)
+        info["dropped_no_write_path"] = True
+        decisions = {}
+
+    applied: Dict[str, int] = {}
+    for model in sorted(decisions):
+        new_replicas = decisions[model]
+        policy = dict(policies.get(model) or {})
+        old_replicas = policy.get("replicas")
+        policy["replicas"] = new_replicas
+        set_desired_state(model, policy)  # read-modify-write, keeps other fields
+        policies[model] = policy
+        applied[model] = new_replicas
+        if executor is not None:
+            try:
+                old = int(old_replicas) if old_replicas is not None else new_replicas
+            except (TypeError, ValueError):
+                old = new_replicas
+            if new_replicas > old:
+                action = "scale_up"
+            elif old > headroom.get(model, old):
+                action = "quota_clamp"
+            else:
+                action = "scale_down"
+            autoscaler.record_scale_event(executor, model, action, time.time())
+    info["decisions"] = applied
+
+    # Quota-aware routing weights for the LiteLLM sync (chantier 1's
+    # distribution.quota_weights; None until that module lands).
+    team_state = autoscaler.build_team_state(policies, quota_scopes)
+    per_model = autoscaler.invert_assignments(assignments)
+    routing_weights = autoscaler.compute_routing_weights(per_model, team_state)
+    info["routing_weights"] = routing_weights is not None
+    return info, routing_weights
+
+
 def sync_once(
     registry: FleetRegistry,
     *,
@@ -137,13 +232,10 @@ def sync_once(
     sync_fn: Optional[Callable[[List[Tuple[str, str]]], Dict[str, Any]]] = None,
     run_fn: Optional[Callable[[list, str], Any]] = None,
     platform_sh: Optional[str] = None,
+    metrics_fn: Optional[Callable[[], Dict[str, Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Run one full control cycle. Returns a summary dict."""
     heartbeat_fn = heartbeat_fn or heartbeat_node
-    if sync_fn is None:
-        def sync_fn(placements, _run_fn=run_fn, _platform_sh=platform_sh):
-            return litellm_sync.sync_from_fleet(
-                placements, restart=True, run_fn=_run_fn, platform_sh=_platform_sh)
 
     stale = registry.mark_stale(STALE_AFTER_S)
     policies = registry.get_desired_state()
@@ -156,6 +248,41 @@ def sync_once(
         scheduler_nodes.append({**node, "vram_free_gb": free.get(node["name"], 0.0)})
     assignments = compute_desired_state(policies, scheduler_nodes)
     missing = shortfall(policies, assignments)
+
+    # Desired-state autoscaling: adjust policy replica counts from serving
+    # signals, then hand quota-aware routing weights to the LiteLLM sync.
+    # A failure here must not break the converge loop below.
+    autoscale_info: Dict[str, Any] = {"enabled": _autoscale_enabled()}
+    routing_weights: Optional[Dict[str, list]] = None
+    if autoscale_info["enabled"]:
+        try:
+            autoscale_info, routing_weights = _run_autoscale(
+                registry, policies, assignments, metrics_fn=metrics_fn)
+        except Exception as exc:
+            autoscale_info = {"enabled": True, "error": str(exc)[:200]}
+            routing_weights = None
+            log_event(_LOG, "autoscale_failed",
+                      f"autoscale pass failed, continuing without it: {exc}",
+                      fields={"error": str(exc)[:200]}, level=logging.WARNING)
+
+    if sync_fn is None:
+        # Canary policies ride on the desired-state policies (written by
+        # model_manager.promotion); node_versions is the *observed* serving
+        # version per node — None until node-agents report it in heartbeats
+        # (lab qualification), so canary entries stay dormant meanwhile.
+        canary_policies = {
+            model: {"canary_version": policy.get("canary_version"),
+                    "canary_traffic_percent": policy.get("canary_traffic_percent")}
+            for model, policy in policies.items()
+            if isinstance(policy, dict) and policy.get("canary_version")
+            and (policy.get("canary_traffic_percent") or 0) > 0
+        }
+
+        def sync_fn(placements, _run_fn=run_fn, _platform_sh=platform_sh,
+                    _weights=routing_weights, _canary=canary_policies):
+            return litellm_sync.sync_from_fleet(
+                placements, restart=True, routing_weights=_weights,
+                canary_policies=_canary, run_fn=_run_fn, platform_sh=_platform_sh)
 
     # Models the registry still wants running on a node but the scheduler no
     # longer assigns there must be stopped explicitly.
@@ -256,6 +383,7 @@ def sync_once(
         "assignments": {name: [item["model"] for item in items]
                         for name, items in assignments.items()},
         "shortfall": missing,
+        "autoscale": autoscale_info,
         "node_errors": node_errors,
         "litellm": {"changed": sync_result.get("changed"),
                     "models": sync_result.get("models")},

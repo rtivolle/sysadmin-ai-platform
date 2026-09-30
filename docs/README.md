@@ -40,6 +40,11 @@ requirement specifications:
 | [model-management.md](model-management.md) | Register, download and locally serve HuggingFace models through vLLM and llama.cpp. |
 | [model-promotion.md](model-promotion.md) | Versioned model rollout: staging → canary → prod, canary traffic, rollback, and the node-agent canary duties (to qualify in lab). |
 | [gpu-fleet.md](gpu-fleet.md) | GPU fleet management: node-agent, fleet registry, desired-state scheduler, placement control loop and dynamic LiteLLM routing. |
+| [litellm-reload-canary.md](litellm-reload-canary.md) | LiteLLM hot-reload qualification (1.103.1), `reload_config()` policy, `routing_weights` mechanics and `{model}-canary` entries. |
+| [fleet-autoscaling.md](fleet-autoscaling.md) | Desired-state autoscaling: signals, thresholds, cooldowns, quota guardrails, and the `observability_fleet_*` metrics the collector must emit. |
+| [quota-aware-distribution.md](quota-aware-distribution.md) | Quota-aware inference distribution: team/project quota scopes, routing weights, graceful degradation (never a hard outage), chargeback. |
+| [fleet-cost-tracking.md](fleet-cost-tracking.md) | GPU cost tracking: per-class pricing, cost accrual, token/replica prorata attribution for chargeback. |
+| [fleet-preemption.md](fleet-preemption.md) | Advanced scheduling policy: priorities, node affinity, and why intra-pass preemption is provably unreachable (cautious preemption). |
 | [nvidia-vllm.md](nvidia-vllm.md) | Ubuntu NVIDIA driver detection, optional CUDA toolkit, and native vLLM configuration. |
 | [observability.md](observability.md) | Out-of-process metrics collector, alerting engine, Prometheus exposition, and VictoriaLogs summary. |
 | [sovereignty.md](sovereignty.md) | Sovereign / blocked-egress operation: air-gap verification, mirror manifests, and egress census. |

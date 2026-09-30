@@ -1,0 +1,47 @@
+# GPU hourly pricing (USD/hour) used by the fleet cost tracker for chargeback.
+#
+# These are INDICATIVE list prices — they are placeholders to calibrate in the
+# lab against the real invoices (cloud provider or hardware amortization).
+# Adjust them freely: the loader reads this file lazily and falls back to
+# `default` (with a warning) when the file is missing or invalid.
+#
+# Override the path with the FLEET_PRICING_PATH environment variable.
+
+# Fallback price when a GPU class is not listed below and no alias matches.
+default: 1.50
+
+# Price per GPU class, USD per GPU-hour. Class names match the `gpu_class`
+# recorded by `CostTracker.accrue` (see backend/services/fleet/cost_tracker.py).
+prices:
+  h100-80gb: 4.00    # NVIDIA H100 80GB HBM3
+  a100-80gb: 2.75    # NVIDIA A100 80GB
+  a100-40gb: 1.75    # NVIDIA A100 40GB
+  l40s: 2.00         # NVIDIA L40S 48GB
+  rtx4090: 0.75      # NVIDIA GeForce RTX 4090 24GB
+  v100: 1.00         # NVIDIA V100 16/32GB
+
+# Alternative spellings the node-agent may report as `gpu_model`.
+# Normalization is case-insensitive and strips non-alphanumerics before
+# matching, so "nvidiah10080gbhbm3" matches the alias below.
+aliases:
+  h100-80gb:
+    - h100
+    - nvidia h100 80gb hbm3
+    - nvidia h100 80gb
+  a100-80gb:
+    - a100 80gb
+    - nvidia a100 80gb
+  a100-40gb:
+    - a100
+    - a100 40gb
+    - nvidia a100 40gb
+  l40s:
+    - nvidia l40s
+    - nvidia l40s 48gb
+  rtx4090:
+    - rtx 4090
+    - nvidia rtx 4090
+    - geforce rtx 4090
+  v100:
+    - nvidia v100
+    - tesla v100
