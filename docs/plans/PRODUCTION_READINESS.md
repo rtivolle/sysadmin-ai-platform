@@ -25,6 +25,18 @@ measurable acceptance criteria, and names its dependencies.
   P2 items block *release acceptance* (REL-01). Within a priority, items are
   ordered by dependency, not importance.
 
+### 2026-09-30 — the PR-H1 three-role design is superseded
+
+PR-H1's three-role topology (`web` / `inference` / `data`) is
+**superseded/extended by the two-role split** (`platform` = data + admin,
+`inference` = GPU nodes) recorded in
+[ADR-0015](../decisions/ADR-0015-two-role-platform-inference-split.md) and the
+GPU fleet control loop in
+[ADR-0016](../decisions/ADR-0016-gpu-fleet-control-loop.md). The `web` and
+`data` roles are kept for compatibility. The new implementation items are
+PR-F1–PR-F5 below; PR-H1 itself is kept as a record of the in-flight
+three-role plumbing.
+
 ## 1. Verified baseline (what production-readiness builds on)
 
 Recorded in [../status/TEST_READY.md](../status/TEST_READY.md) (2026-09-24) and
@@ -229,15 +241,16 @@ backed by a recorded run:
   proves it.
 - **Dependencies.** None. **Blocks:** PR-E1, PR-D4.
 
-#### PR-H1 — Three-machine deployment implementation
+#### PR-H1 — Three-machine deployment implementation *(superseded 2026-09-30)*
 
-- **Scope.** Implement [MULTI_HOST_DEPLOYMENT.md](MULTI_HOST_DEPLOYMENT.md):
+- **Scope.** ~~Implement [MULTI_HOST_DEPLOYMENT.md](MULTI_HOST_DEPLOYMENT.md):
   split the platform across web-delivery (W), inference (I) and data (D)
-  machines — installer role prompts with peer addresses and a pre-apply
-  connectivity check, role-aware `install.sh`/`platform.sh`, templated
-  Traefik/Valkey/service bind addresses, host firewall rule sets, and the
-  key-copy runbook (user keys live on W **and** I because LiteLLM's auth is
-  in-process).
+  machines~~ — **superseded by the two-role split (ADR-0015)**: the three-role
+  design is replaced/extended by `platform` (data + admin) and `inference`
+  (GPU nodes). The `web`/`data` roles remain installable for compatibility.
+  What remains relevant from this item: role-aware `install.sh`/`platform.sh`
+  machinery, per-role firewall rulesets, staged bring-up practice, and the
+  real-machine acceptance gate — all carried forward into PR-F1–PR-F5 below.
 - **Acceptance criteria.** Staged bring-up D → I → W on real machines; the
   full backend suite passes pointed at the remote Valkey/VictoriaLogs (they
   already honor `VALKEY_URL`/`VICTORIALOGS_URL`); firewall matrices verified
@@ -258,6 +271,90 @@ backed by a recorded run:
   recovery interval set from measured cancellation behaviour; alert runbooks
   (PR-D1) exercised by at least one real alert.
 - **Dependencies.** PR-C2, PR-D1. **Blocks:** PR-D4.
+
+### P1 — two-role topology and GPU fleet control loop (2026-09-30)
+
+These items implement the two-role split (ADR-0015) and the fleet control
+loop (ADR-0016) that supersede PR-H1. All block declaring the service
+production-ready in its target topology.
+
+#### PR-F1 — Fleet registry in the control store
+
+- **Scope.** Add the fleet tables to the PostgreSQL control store (ADR-0014
+  wiring): `gpu_nodes` (identity, GPU inventory, status, last heartbeat),
+  `model_placements` (model → node, real vs desired state), and
+  `fleet_desired_state` (policies). The registry is the single source of
+  truth for `litellm_sync`, the placement scheduler and the admin view.
+- **Acceptance criteria.**
+  - Node lifecycle transitions (pending → approved → active → stale →
+    drained → retired) unit-tested, including idempotent heartbeat updates.
+  - Register → approve → heartbeat round trip recorded against a live cluster
+    in TEST_READY.md.
+- **Dependencies.** ADR-0014 wiring (corrective work 1 in ADR-0014).
+  **Blocks:** PR-F2, PR-F3.
+
+#### PR-F2 — node-agent with desired-state convergence
+
+- **Scope.** Extract `model_manager` (router, registry, downloader, vLLM and
+  llama.cpp servers) out of `agent_tools` into the new
+  `backend/services/node_agent/`; serve :8001 endpoints
+  (register/heartbeat/healthz/drain); converge the platform-sent desired
+  state (heartbeat response delta) by pulling weights and starting/stopping
+  engines. GPU nodes hold **no user secrets** — client certificate only.
+- **Acceptance criteria.**
+  - Heartbeat-delta convergence tested with injected engine seams (missing
+    weights pulled, surplus engines stopped, state reported next heartbeat).
+  - An inventory test asserts no user key material is read or stored on the
+    node; code review confirms no user-secret handling path.
+  - Evidence recorded in TEST_READY.md.
+- **Dependencies.** PR-F1, PR-F4. **Blocks:** multi-GPU fleet acceptance.
+
+#### PR-F3 — litellm_sync daemon and dynamic model_list
+
+- **Scope.** Turn `litellm_sync` into a daemon (or state-change hook) that
+  regenerates LiteLLM's `config.yaml` on every fleet transition: one
+  deployment per (model × healthy node) under the same `model_name`,
+  `api_base` → node `:8000`, with the existing `least-busy` routing
+  strategy. Regeneration is idempotent (hash-gated on fleet state).
+- **Acceptance criteria.**
+  - Idempotent regeneration unit-tested (no-op when state hash unchanged).
+  - The reload path is qualified **on the pinned LiteLLM version**: hot
+    admin reload if available, otherwise the fast loopback restart — with the
+    interruption window measured and the agent retry behaviour confirmed.
+  - A drained/stale node leaves the `model_list` within the measured window.
+- **Dependencies.** PR-F1, PR-C1. **Blocks:** multi-GPU serving claims.
+
+#### PR-F4 — mTLS day 1 for platform↔inference links
+
+- **Scope.** Replace PR-H1's "plaintext LAN accepted, TLS later" with mTLS
+  from the first multi-node deployment: fleet CA provisioned by `install.sh`,
+  per-node client certificates (CN = node name), `CERT_REQUIRED` on the fleet
+  API (:8001), inference façade (:8000) and audit replay (:9428); local CRL
+  revocation on decommission (ADR-0016, including the uvicorn CN limitation).
+- **Acceptance criteria.**
+  - A plaintext client is refused; a client with a wrong/unknown CA cert is
+    rejected; a decommissioned node's cert is revoked and the node leaves
+    the `model_list` automatically.
+  - Firewall matrix verified: inference accepts :8000/:8001 from the
+    platform address only; default-deny elsewhere.
+- **Dependencies.** PR-F2. **Blocks:** any production multi-node deployment.
+
+#### PR-F5 — Automated backups, Postgres PITR, first restore drill
+
+- **Scope.** Enterprise level 1 (ARCHITECTURE.md §8.2): Postgres weekly base
+  + continuous WAL archiving (**PITR**, RPO ≤ 15 min), daily VictoriaLogs
+  snapshots with locked retention, config/keys backed up encrypted (age) to
+  external storage, ordered patching (GPU nodes drained one by one, then the
+  platform in an announced maintenance window with mandatory pre-update
+  backup). The **first restore drill** happens before level 1 is declared.
+- **Acceptance criteria.**
+  - PITR recovery to a point in time demonstrated on the platform node;
+    measured RPO inside the 15-minute objective.
+  - First drill passes with a measured RTO inside the 2-hour target; evidence
+    in TEST_READY.md. (PR-B4 remains the full bring-up + production-sized
+    drill.)
+- **Dependencies.** Control-store Postgres live. **Blocks:** declaring
+  enterprise level 1.
 
 ### P2 — release acceptance
 
@@ -320,14 +417,19 @@ backed by a recorded run:
 | PR-B3 | Multi-worker Valkey run | P1 | — | not started | — |
 | PR-B4 | Restore bring-up + scale | P1 | — | not started | file-level drill done 2026-09-24 |
 | PR-B5 | Owner-scored 30-task eval | P1 | C1 | not started | synthetic pack only |
-| PR-H1 | Three-machine deployment | P1 | — | **in flight** | role plumbing implemented + unit-tested (2026-09-25): `docs/multi-host.md`, `test_multihost_roles.py`; real-machine bring-up still outstanding |
+| PR-H1 | Three-machine deployment | P1 | — | **superseded (design, 2026-09-30)** | three-role W/I/D replaced by the two-role split (ADR-0015); `web`/`data` roles kept for compatibility; implementation continues under PR-F1–PR-F5 |
+| PR-F1 | Fleet registry (control store) | P1 | ADR-0014 wiring | not started | — |
+| PR-F2 | node-agent + desired-state convergence | P1 | F1, F4 | not started | — |
+| PR-F3 | litellm_sync daemon + dynamic model_list | P1 | F1, C1 | not started | — |
+| PR-F4 | mTLS day 1 (platform↔inference) | P1 | F2 | not started | — |
+| PR-F5 | Backups + PITR + first restore drill | P1 | — | not started | — |
 | PR-D1 | Metrics, alerts, runbooks | P1 | C1 | **done (evidence linked)** | `backend/services/observability/` (collector + alerts), `docs/observability.md`, `docs/runbooks/*.md`, `test_observability_*.py` |
 | PR-D2 | Off-host backup + audit anchor | P1 | — | **done (evidence linked)** | `backend/services/resilience/audit_anchor.py` + `offhost_backup.py`, `test_audit_anchor.py` + `test_offhost.py` |
 | PR-B6 | 24 h pilot soak | P1 | C2, D1 | not started | — |
 | PR-D3 | Blocked-egress operation | P2 | — | **done (evidence linked)** | `backend/tests/qualification/egress_audit.py`, `egress_allowlist.json`, `docs/sovereignty.md`, `test_egress_audit.py` |
 | PR-H2 | Inter-machine TLS | P2 | H1 | not started | — |
 | PR-D4 | Release bundle (REL-01) | P2 | all above | not started | — |
-| PR-D5 | Divergence decision records | P2 | — | **done (evidence linked)** | ADR-0001 through ADR-0014 published in `docs/decisions/` and indexed in `docs/decisions/README.md` |
+| PR-D5 | Divergence decision records | P2 | — | **done (evidence linked)** | ADR-0001 through ADR-0016 published in `docs/decisions/` and indexed in `docs/decisions/README.md` |
 
 Status values: `not started` / `claimed by <agent or session>` / `in flight` /
 `done (evidence linked)`. Update this table in the same change that records

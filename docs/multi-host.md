@@ -246,3 +246,57 @@ Record results in [status/TEST_READY.md](status/TEST_READY.md).
 - The admin console's `inferenceMode` label still probes the inference engine
   on loopback and therefore shows `unknown` on a web host; the *services*
   panel (which is what the checklist covers) is peer-aware.
+
+## 9. GPU-fleet topology (roles `platform` / `inference`, Phase B)
+
+The fleet split runs the state + admin tier on one **platform** host and the
+GPU tier on N **inference** (GPU) nodes. It replaces the PR-H1 three-machine
+split (W/I/D, which stays supported for compatibility) when the GPU tier must
+be added to and removed from without friction.
+
+Roles:
+
+| Host | Services | Notes |
+|---|---|---|
+| P (platform) | valkey, victorialogs, audit_outbox, seaweedfs, auth_gateway, agent_tools, litellm (loopback :4000), litellm_sync, traefik, harness_gateway | data+admin tier; LiteLLM is served here, so it binds loopback |
+| GPU node (inference) | inference engine (:8000, LAN), audit_outbox, node_agent (:8001) | **secretless**: no master.key, no valkey-password.key |
+
+Install order: platform first, then each GPU node:
+
+```bash
+# Platform host
+./install.sh --role platform --lan-bind-ip 10.0.0.20 \
+    --peer-inference-hosts 10.0.0.21,10.0.0.22
+
+# Each GPU node (driver install is a separate explicit step)
+./install.sh --role inference --lan-bind-ip 10.0.0.21 \
+    --platform-url https://10.0.0.20:3080 --node-name gpu-01
+./install.sh --role inference --lan-bind-ip 10.0.0.21 --nvidia
+```
+
+Key facts:
+
+- A GPU node needs only `--platform-url`: it registers and heartbeats to the
+  platform's fleet API (`:3080`), and its audit outbox replays to the
+  platform's VictoriaLogs (`:9428`). `--peer-data` is accepted but defaults to
+  the platform URL's host.
+- `--peer-inference-hosts` on the platform is a **bootstrap** list only; the
+  fleet registry (fleet worker) is the source of truth once nodes register.
+- Secrets are provisioned on `all`/`web`/`platform` only; the GPU node never
+  holds keys. Its fleet identity (`NODE_NAME`) is issued by the CA
+  (`backend/services/resilience/fleet-ca.sh issue-node <node-name>`), run
+  during install when the script is present.
+- Firewall: `backend/config/firewall/platform.nft` (default-deny: user LAN may
+  reach only :8443/:8080; the fleet LAN may reach :3080/:9428) and
+  `backend/config/firewall/inference.nft` (only the platform may reach
+  :8000/:8001; the node reaches out to the platform on :3080/:9428). Not
+  applied automatically — load explicitly with `nft -f`.
+- Flow matrix: LiteLLM on P calls `http://<gpu-node>:8000` per the desired
+  state; node_agent on the GPU node calls `https://platform:3080` for
+  register/heartbeat/desired-state and drains on instruction. See the full
+  matrix in the architecture doc (§5).
+
+Limitations inherited from §8 apply: plaintext inter-machine links until
+PR-H2 lands (the platform-to-node hops are the same class), single instance
+of each control-plane service, and the topology itself is not yet verified on
+real machines (acceptance = §7 adapted: P first, then GPU nodes).

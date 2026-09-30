@@ -14,6 +14,7 @@ import json
 import shutil
 import argparse
 import subprocess
+import urllib.parse
 import yaml
 from typing import Dict, Any
 
@@ -100,6 +101,26 @@ def _is_loopback(host: Any) -> bool:
     return value == "" or value.startswith("127.") or value in ("localhost", "::1")
 
 
+def _platform_url_host(platform_url: Any) -> str:
+    """Host part of a PLATFORM_URL (``https://<platform-ip>:3080`` -> ``<platform-ip>``)."""
+    try:
+        return urllib.parse.urlparse(str(platform_url or "").strip()).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _inference_data_host(cfg: Dict[str, Any]) -> str:
+    """Effective data host for the inference role.
+
+    Mirrors install.sh: an explicit --peer-data wins; otherwise the host is
+    derived from the platform URL (same machine in the reference topology).
+    """
+    peer = str(cfg.get("peer_data_host") or "").strip()
+    if not _is_loopback(peer):
+        return peer
+    return _platform_url_host(cfg.get("platform_url"))
+
+
 def validate_role_config(cfg: Dict[str, Any]) -> str:
     """Return a fail-closed error for an unusable split, or None.
 
@@ -113,13 +134,18 @@ def validate_role_config(cfg: Dict[str, Any]) -> str:
         return f"Role '{role}' needs this machine's LAN address (--lan-bind-ip <ip>)."
     if role == "web" and _is_loopback(cfg.get("peer_inference_host")):
         return "Role 'web' needs the inference host (--peer-inference <ip>)."
-    if role in ("web", "inference") and _is_loopback(cfg.get("peer_data_host")):
-        return f"Role '{role}' needs the data host (--peer-data <ip>)."
+    if role == "web" and _is_loopback(cfg.get("peer_data_host")):
+        return "Role 'web' needs the data host (--peer-data <ip>)."
+    if role == "inference":
+        if not str(cfg.get("platform_url") or "").strip():
+            return "Role 'inference' needs the platform URL (--platform-url <url>)."
+        if _is_loopback(_inference_data_host(cfg)):
+            return "Role 'inference' needs the platform (data) host (--peer-data <ip>)."
     return None
 
 
 def run_role_prompt(defaults_only: bool = False, cli: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Ask which machine role this host plays and its peer addresses (PR-H1).
+    """Ask which machine role this host plays and its peer addresses (PR-H1, Phase B).
 
     Runs first in the wizard (docs/plans/MULTI_HOST_DEPLOYMENT.md §6): role,
     then peer addresses, then a connectivity check before any config is applied.
@@ -136,6 +162,9 @@ def run_role_prompt(defaults_only: bool = False, cli: Dict[str, Any] = None) -> 
         "peer_data_valkey_port": 6379,
         "peer_data_logs_port": 9428,
         "peer_data_seaweedfs_port": 8333,
+        "peer_inference_hosts": "",
+        "platform_url": "",
+        "node_name": "",
     }
     for key in cfg:
         if cli.get(key) not in (None, ""):
@@ -157,10 +186,11 @@ def run_role_prompt(defaults_only: bool = False, cli: Dict[str, Any] = None) -> 
 
     console.print("  [bold cyan]1.[/bold cyan] [bold]all[/bold]        single host — everything (today's default)")
     console.print("  [bold cyan]2.[/bold cyan] [bold]web[/bold]        application tier (Traefik, agent platform, sandbox)")
-    console.print("  [bold cyan]3.[/bold cyan] [bold]inference[/bold]  GPU host (LiteLLM, inference engine)")
+    console.print("  [bold cyan]3.[/bold cyan] [bold]inference[/bold]  GPU node (inference engine + node-agent, secretless)")
     console.print("  [bold cyan]4.[/bold cyan] [bold]data[/bold]       state tier (Valkey, VictoriaLogs, SeaweedFS)")
-    choice = Prompt.ask("Machine role", choices=["1", "2", "3", "4"], default="1")
-    role = {"1": "all", "2": "web", "3": "inference", "4": "data"}[choice]
+    console.print("  [bold cyan]5.[/bold cyan] [bold]platform[/bold]   data+admin tier (state + agent + LiteLLM + fleet control)")
+    choice = Prompt.ask("Machine role", choices=["1", "2", "3", "4", "5"], default="1")
+    role = {"1": "all", "2": "web", "3": "inference", "4": "data", "5": "platform"}[choice]
     cfg["role"] = role
 
     if role != "all":
@@ -170,7 +200,19 @@ def run_role_prompt(defaults_only: bool = False, cli: Dict[str, Any] = None) -> 
         cfg["peer_inference_host"] = Prompt.ask("Inference peer (I) LAN address", default="10.0.0.11")
         cfg["peer_data_host"] = Prompt.ask("Data peer (D) LAN address", default="10.0.0.12")
     elif role == "inference":
-        cfg["peer_data_host"] = Prompt.ask("Data peer (D) LAN address", default="10.0.0.12")
+        # No default: the platform URL is required and must not silently point
+        # at an example address.
+        cfg["platform_url"] = Prompt.ask("Platform URL (fleet API, e.g. https://<platform-ip>:3080)")
+        cfg["node_name"] = Prompt.ask("Node name", default="gpu-01")
+        cfg["peer_data_host"] = Prompt.ask(
+            "Data peer (D) LAN address (empty = same host as the platform URL)",
+            default="",
+        )
+    elif role == "platform":
+        cfg["peer_inference_hosts"] = Prompt.ask(
+            "GPU node bootstrap list, comma-separated (empty ok)",
+            default="",
+        )
     # data serves only; it has no peers to reach.
 
     error = validate_role_config(cfg)
@@ -197,6 +239,9 @@ def _peer_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "PEER_DATA_VALKEY_PORT": str(cfg.get("peer_data_valkey_port", 6379)),
         "PEER_DATA_LOGS_PORT": str(cfg.get("peer_data_logs_port", 9428)),
         "PEER_DATA_SEAWEEDFS_PORT": str(cfg.get("peer_data_seaweedfs_port", 8333)),
+        "PLATFORM_URL": str(cfg.get("platform_url") or ""),
+        "NODE_NAME": str(cfg.get("node_name") or ""),
+        "PEER_INFERENCE_HOSTS": str(cfg.get("peer_inference_hosts") or ""),
     }
     if role == "all":
         env.update({
@@ -207,7 +252,14 @@ def _peer_env(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "PEER_DATA_VALKEY_PORT": "6379",
             "PEER_DATA_LOGS_PORT": "9428",
             "PEER_DATA_SEAWEEDFS_PORT": "8333",
+            "PLATFORM_URL": "",
+            "NODE_NAME": "",
+            "PEER_INFERENCE_HOSTS": "",
         })
+    if role == "inference":
+        # install.sh semantics: --peer-data wins, otherwise the data host is
+        # derived from the platform URL (same machine in the reference topology).
+        env["PEER_DATA_HOST"] = _inference_data_host(cfg) or "127.0.0.1"
     return env
 
 
@@ -223,7 +275,7 @@ def write_deployment_env(cfg: Dict[str, Any], config_dir: str) -> str:
     env = _peer_env(cfg)
     with open(env_path, "w", encoding="utf-8") as handle:
         handle.write(
-            "# Generated by installer_tui.py (PR-H1). Machine-specific; git-ignored.\n"
+            "# Generated by installer_tui.py (PR-H1 / Phase B). Machine-specific; git-ignored.\n"
             "# ROLE=all means one machine: every service, all binds loopback.\n"
             + "".join(f"{key}={value}\n" for key, value in env.items())
         )
@@ -240,7 +292,11 @@ def check_peer_connectivity(cfg: Dict[str, Any]) -> bool:
     console.print(f"[red]Connectivity check FAILED for role '{role}':[/red]")
     for label, host, port in failures:
         console.print(f"[red]  - cannot reach {label} at {host}:{port}[/red]")
-    console.print("[red]No configuration was applied. Bring peers up (D -> I -> W) and retry.[/red]")
+    staged = {
+        "platform": "platform first, then the GPU nodes",
+        "inference": "the platform host first, then this GPU node",
+    }.get(role, "D -> I -> W")
+    console.print(f"[red]No configuration was applied. Bring peers up ({staged}) and retry.[/red]")
     return False
 
 
@@ -249,13 +305,13 @@ def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False, 
 
     Role-appropriate subsets (docs/plans/MULTI_HOST_DEPLOYMENT.md §6): the
     inference questions belong to `all`/`inference`, the workspace and quota
-    questions to `all`/`web`, and each port question only to the roles that
-    serve it. Skipped questions keep their defaults, so the saved configuration
+    questions to `all`/`web`/`platform`, and each port question only to the
+    roles that serve it. Skipped questions keep their defaults, so the saved configuration
     snapshot stays complete for every role.
     """
     cfg = {}
     ask_inference = role in ("all", "inference")
-    ask_workspaces = role in ("all", "web")
+    ask_workspaces = role in ("all", "web", "platform")
 
     console.print("\n[bold yellow]═══════════ Step 1: Inference Engine Configuration ═══════════[/bold yellow]")
 
@@ -303,15 +359,16 @@ def run_interactive_wizard(survey: Dict[str, Any], defaults_only: bool = False, 
     if not defaults_only:
         # Only the ports this role serves are worth asking about; the rest keep
         # their defaults so the snapshot stays complete.
-        if role in ("all", "web"):
+        if role in ("all", "web", "platform"):
             cfg["traefik_http_port"] = IntPrompt.ask("Traefik HTTP Gateway Port", default=8080)
             cfg["traefik_https_port"] = IntPrompt.ask("Traefik HTTPS Gateway Port", default=8443)
             cfg["traefik_dash_port"] = IntPrompt.ask("Traefik Dashboard Port", default=8081)
             cfg["agent_port"] = IntPrompt.ask("Agent Platform API Port", default=3080)
             cfg["auth_port"] = IntPrompt.ask("ForwardAuth Port", default=3081)
-        if role in ("all", "inference"):
+        if role in ("all", "platform"):
+            # LiteLLM moved to the platform tier in the GPU-fleet split (Phase B).
             cfg["litellm_port"] = IntPrompt.ask("LiteLLM Proxy Port", default=4000)
-        if role in ("all", "data"):
+        if role in ("all", "data", "platform"):
             cfg["valkey_port"] = IntPrompt.ask("Valkey State & Cache Port", default=6379)
             cfg["seaweedfs_s3_port"] = IntPrompt.ask("SeaweedFS S3 Port", default=8333)
             cfg["victorialogs_port"] = IntPrompt.ask("VictoriaLogs Audit Port", default=9428)
@@ -355,9 +412,10 @@ def apply_configuration(cfg: Dict[str, Any], root_dir: str):
     keys_dir = os.path.join(config_dir, "keys")
 
     role = cfg.get("role", "all")
-    serves_traefik = role in ("all", "web")
-    serves_litellm = role in ("all", "inference")
-    serves_valkey = role in ("all", "data")
+    serves_traefik = role in ("all", "web", "platform")
+    # LiteLLM moved to the platform tier in the GPU-fleet split (Phase B).
+    serves_litellm = role in ("all", "platform")
+    serves_valkey = role in ("all", "data", "platform")
 
     def write_config(path: str, content: str, enabled: bool) -> None:
         """Write a generated config only on the roles that consume it."""
@@ -475,7 +533,7 @@ daemonize no
         task3 = progress.add_task("[yellow]Provisioning Workspaces & Sysadmin Keys...", total=100)
         os.makedirs(keys_dir, exist_ok=True)
 
-        if role in ("all", "web"):
+        if role in ("all", "web", "platform"):
             os.makedirs(cfg["workspaces_dir"], exist_ok=True)
             for i in range(1, cfg["num_users"] + 1):
                 u_id = f"sysadmin-{i:02d}"
@@ -488,7 +546,7 @@ daemonize no
             subprocess.run([sys.executable, os.path.join(keys_dir, "provision-logins.py")], check=True)
         else:
             progress.update(task3, advance=80)
-            console.print("[dim]Workspaces and keys live on the web host; copy keys from W (docs/multi-host.md).[/dim]")
+            console.print("[dim]Workspaces and keys live on the web/platform host; copy keys from W (docs/multi-host.md).[/dim]")
 
         # Save platform configuration snapshot
         with open(os.path.join(config_dir, "platform_config.json"), "w", encoding="utf-8") as f:
@@ -505,15 +563,18 @@ def main():
     parser.add_argument("--start", action="store_true", help="Automatically launch all backend services after setup")
     parser.add_argument("--dry-run", action="store_true",
                         help="Resolve the role, show the plan and exit without writing anything")
-    parser.add_argument("--role", choices=["all", "web", "inference", "data"],
-                        help="Machine role: one host (all) or a split tier (web/inference/data)")
+    parser.add_argument("--role", choices=["all", "web", "inference", "data", "platform"],
+                        help="Machine role: one host (all) or a split tier (web/inference/data/platform)")
     parser.add_argument("--lan-bind-ip", help="This machine's LAN address (required for every role except all)")
-    parser.add_argument("--peer-inference", help="Inference host address (role web)")
+    parser.add_argument("--peer-inference", help="Inference host address (role web, compat PR-H1)")
     parser.add_argument("--peer-inference-port", type=int, help="LiteLLM port on the inference host (default 4000)")
-    parser.add_argument("--peer-data", help="Data host address (roles web and inference)")
+    parser.add_argument("--peer-data", help="Data host address (roles web/inference, compat PR-H1)")
     parser.add_argument("--peer-data-valkey-port", type=int, help="Valkey port on the data host (default 6379)")
     parser.add_argument("--peer-data-logs-port", type=int, help="VictoriaLogs port on the data host (default 9428)")
     parser.add_argument("--peer-data-seaweedfs-port", type=int, help="SeaweedFS S3 port on the data host (default 8333)")
+    parser.add_argument("--platform-url", help="Platform fleet API URL (role inference, Phase B)")
+    parser.add_argument("--node-name", help="Fleet node name (role inference; default: hostname)")
+    parser.add_argument("--peer-inference-hosts", help="GPU node bootstrap list, comma-separated (role platform)")
     args = parser.parse_args()
     role_cli = {
         "role": args.role,
@@ -524,6 +585,9 @@ def main():
         "peer_data_valkey_port": args.peer_data_valkey_port,
         "peer_data_logs_port": args.peer_data_logs_port,
         "peer_data_seaweedfs_port": args.peer_data_seaweedfs_port,
+        "platform_url": args.platform_url,
+        "node_name": args.node_name,
+        "peer_inference_hosts": args.peer_inference_hosts,
     }
 
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -560,8 +624,16 @@ def main():
     summary_table.add_row("Machine Role", cfg["role"])
     if cfg["role"] != "all":
         summary_table.add_row("This Host's LAN Address", str(cfg["lan_bind_ip"]))
-        summary_table.add_row("Inference Peer", f"{cfg['peer_inference_host']}:{cfg['peer_inference_port']}")
-        summary_table.add_row("Data Peer", f"{cfg['peer_data_host']}:{cfg['peer_data_valkey_port']}")
+        if cfg["role"] in ("web",):
+            summary_table.add_row("Inference Peer", f"{cfg['peer_inference_host']}:{cfg['peer_inference_port']}")
+            summary_table.add_row("Data Peer", f"{cfg['peer_data_host']}:{cfg['peer_data_valkey_port']}")
+        elif cfg["role"] == "inference":
+            summary_table.add_row("Platform URL", str(cfg["platform_url"]))
+            summary_table.add_row("Node Name", str(cfg["node_name"]) or "(hostname)")
+            summary_table.add_row("Data Peer", f"{_inference_data_host(cfg)}:{cfg['peer_data_logs_port']}")
+        elif cfg["role"] == "platform":
+            hosts = str(cfg["peer_inference_hosts"] or "").strip() or "(fleet registry)"
+            summary_table.add_row("GPU Bootstrap List", hosts)
     summary_table.add_row("Inference Mode", cfg["inference_mode"])
     summary_table.add_row("Upstream vLLM URL", cfg["upstream_vllm_url"] or "(Local simulated)")
     summary_table.add_row("Fast Model", cfg["fast_model"])

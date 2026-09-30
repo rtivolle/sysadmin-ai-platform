@@ -351,7 +351,12 @@ async def chat_completions(request: Request):
 if __name__ == "__main__":
     configure("inference")
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    log_event(_LOG, "service_start", f"inference engine listening on 127.0.0.1:{port}",
-              fields={"port": port, "host": "127.0.0.1",
+    # Bind host is operator-configurable (Phase B): loopback on a single host,
+    # the machine's LAN address on a GPU node so the platform's LiteLLM can
+    # reach it. platform.sh exports INFERENCE_BIND_HOST accordingly; the
+    # firewall (inference.nft) restricts callers to the platform host.
+    bind_host = os.environ.get("INFERENCE_BIND_HOST", "127.0.0.1")
+    log_event(_LOG, "service_start", f"inference engine listening on {bind_host}:{port}",
+              fields={"port": port, "host": bind_host,
                       "upstream_vllm": bool(UPSTREAM_VLLM_URL)})
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info", access_log=False)  # requests are logged as JSON by the middleware
+    uvicorn.run(app, host=bind_host, port=port, log_level="info", access_log=False)  # requests are logged as JSON by the middleware

@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+# Firewall ruleset for the PLATFORM (data+admin) host — GPU-fleet split (Phase B).
+#
+# NOT applied by the installer. Review the peer addresses and interface name,
+# then load explicitly:
+#     nft -f backend/config/firewall/platform.nft
+#
+# Policy: default-deny. User networks reach only the TLS front door (:8443,
+# :8080 redirect). GPU nodes reach the fleet API (:3080, register/heartbeat)
+# and VictoriaLogs (:9428, audit outbox replay). The platform reaches out to
+# the GPU nodes on :8000 (LiteLLM inference traffic) and :8001 (fleet control:
+# desired-state, drain). LiteLLM :4000, Valkey :6379 and SeaweedFS stay
+# loopback-only and need no rule.
+
+define LAN_IFACE = "eth0"
+define FLEET_NET  = 10.0.0.0/24   # GPU-node LAN; narrow to the node IPs when known
+
+table inet sysadmin {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    ct state established,related accept
+    iif lo accept
+
+    # User networks reach only the front door: 8443 (TLS) + 8080 (redirect).
+    iifname $LAN_IFACE tcp dport 8443 accept
+    iifname $LAN_IFACE tcp dport 8080 accept
+
+    # GPU nodes: fleet API register/heartbeat (:3080) and audit outbox
+    # replay (:9428). ForwardAuth (:3081) is loopback-only, reached through
+    # Traefik; no LAN inbound accept.
+    ip saddr $FLEET_NET tcp dport 3080 accept
+    ip saddr $FLEET_NET tcp dport 9428 accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    ct state established,related accept
+    oif lo accept
+
+    # Outbound to the GPU fleet only: inference traffic and fleet control.
+    ip daddr $FLEET_NET tcp dport { 8000, 8001 } accept
+  }
+}

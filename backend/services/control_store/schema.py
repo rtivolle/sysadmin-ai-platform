@@ -11,6 +11,11 @@ the platform itself needs:
 * ``sysadmin_token_ledger`` - the durable daily token ledger. An unsettled row
   is charged at its reservation estimate, which is the conservative direction
   required by DEVELOPMENT_PLAN §4 ("never silently count zero").
+* ``gpu_nodes`` - the GPU fleet registry: enrollment, the human approval gate,
+  liveness heartbeats and the drain lifecycle.
+* ``model_placements`` - desired vs actual state per (model, node) pair.
+* ``fleet_desired_state`` - model placement policies (replicas, VRAM budget,
+  GPU class, engine params).
 """
 from typing import Sequence
 
@@ -58,6 +63,44 @@ STATEMENTS: Sequence[str] = (
         key        TEXT PRIMARY KEY,
         value      TEXT NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS gpu_nodes (
+        name               TEXT PRIMARY KEY,
+        gpu_model          TEXT,
+        gpu_count          INTEGER NOT NULL DEFAULT 0,
+        vram_total_gb      DOUBLE PRECISION NOT NULL DEFAULT 0,
+        compute_capability TEXT,
+        address            TEXT,
+        status             TEXT NOT NULL DEFAULT 'pending',
+        last_heartbeat     TIMESTAMPTZ,
+        approved_by        TEXT,
+        approved_at        TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CHECK (status IN ('pending', 'approved', 'active', 'stale',
+                          'drained', 'retired'))
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_gpu_nodes_status
+        ON gpu_nodes (status)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS fleet_desired_state (
+        model_name TEXT PRIMARY KEY,
+        policy     JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS model_placements (
+        model_name    TEXT NOT NULL,
+        node_name     TEXT NOT NULL,
+        desired_state TEXT NOT NULL DEFAULT '',
+        actual_state  TEXT NOT NULL DEFAULT '',
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (model_name, node_name)
     )
     """,
 )

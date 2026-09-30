@@ -37,6 +37,7 @@ requirement specifications:
 | [multi-host.md](multi-host.md) | One machine or a three-machine split (web/inference/data): choosing the role, staged bring-up, key copy, firewall, verification checklist. |
 | [configuration.md](configuration.md) | Configuration files, environment variables, ports and paths. |
 | [model-management.md](model-management.md) | Register, download and locally serve HuggingFace models through vLLM and llama.cpp. |
+| [gpu-fleet.md](gpu-fleet.md) | GPU fleet management: node-agent, fleet registry, desired-state scheduler, placement control loop and dynamic LiteLLM routing. |
 | [nvidia-vllm.md](nvidia-vllm.md) | Ubuntu NVIDIA driver detection, optional CUDA toolkit, and native vLLM configuration. |
 | [observability.md](observability.md) | Out-of-process metrics collector, alerting engine, Prometheus exposition, and VictoriaLogs summary. |
 | [sovereignty.md](sovereignty.md) | Sovereign / blocked-egress operation: air-gap verification, mirror manifests, and egress census. |

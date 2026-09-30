@@ -26,6 +26,7 @@ from services.agent_tools.audit import log_audit_event
 from services.agent_runtime.router import router as agent_router
 from services.target_adapter.router import router as target_adapter_router
 from services.model_manager.router import router as model_manager_router
+from services.fleet.router import router as fleet_router
 from services.agent_runtime.workspace import ensure_workspace
 from services.auth_gateway.server import authenticate_request, role_for_user
 from services.hardware_survey import run_hardware_survey
@@ -44,8 +45,17 @@ app.include_router(agent_router, prefix="/api/v1/agent", tags=["Agent Runtime"])
 app.include_router(agent_router, prefix="/agent", tags=["Agent Runtime Alias"])
 # Mount target adapter router
 app.include_router(target_adapter_router)
-# Mount local model lifecycle router (admin-only)
-app.include_router(model_manager_router)
+# Machine role gates which fleet/model surfaces this process serves.
+# Default "all" (dev mono-host) keeps the historical behaviour: both routers.
+# Role "platform" serves the fleet API but not the local model lifecycle
+# (that moved to the GPU nodes' node-agent); any other role serves neither.
+SYSADMIN_ROLE = os.getenv("SYSADMIN_ROLE", "all").strip().lower()
+if SYSADMIN_ROLE in ("all", "platform"):
+    # Mount fleet admin API (approve/drain/decommission/list/health)
+    app.include_router(fleet_router)
+if SYSADMIN_ROLE == "all":
+    # Mount local model lifecycle router (admin-only)
+    app.include_router(model_manager_router)
 
 LITELLM_URL = os.getenv("LITELLM_URL", "http://127.0.0.1:4000")
 _survey_cache = None

@@ -8,6 +8,7 @@ change requires a LiteLLM restart, which the caller triggers through
 `platform.sh` — there is no config hot-reload in the config-only proxy.
 """
 import os
+import re
 import subprocess
 import tempfile
 from typing import Any, Callable, Dict, Optional
@@ -17,6 +18,10 @@ import yaml
 from . import registry as registry_module
 
 MANAGED_BY = "sysadmin-model-manager"
+# Tag owned by the fleet manager (Phase A). Distinct from MANAGED_BY above:
+# `sync()` owns local-model entries, `sync_from_fleet()` owns (model x node)
+# entries; each function preserves the other's block untouched.
+FLEET_MANAGED_BY = "sysadmin-fleet-manager"
 INFERENCE_API_BASE = os.getenv("MODEL_INFERENCE_API_BASE", "http://127.0.0.1:8000/v1")
 
 
@@ -116,3 +121,122 @@ def managed_model_names(config_path: Optional[str] = None) -> list:
     except OSError:
         return []
     return [entry.get("model_name") for entry in (config.get("model_list") or []) if _is_managed(entry)]
+
+
+# --- fleet sync (Phase A: model_list generated from the fleet registry) -----
+
+_NODE_ADDRESS_RE = re.compile(r"^[A-Za-z0-9._:-]{1,253}$")
+
+
+def fleet_inference_scheme() -> str:
+    """Scheme for LiteLLM -> node :8000 traffic; `https` (mTLS) by default."""
+    scheme = os.getenv("FLEET_INFERENCE_SCHEME", "https").strip().lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("FLEET_INFERENCE_SCHEME must be 'http' or 'https'")
+    return scheme
+
+
+def validate_node_address(address: Any) -> str:
+    if not isinstance(address, str) or not _NODE_ADDRESS_RE.match(address):
+        raise ValueError("node address must be a hostname or IP literal")
+    return address
+
+
+def _fleet_managed_entry(model_name: str, node_address: str) -> Dict[str, Any]:
+    scheme = fleet_inference_scheme()
+    return {
+        "model_name": model_name,
+        "litellm_params": {
+            "model": f"openai/{model_name}",
+            "api_base": f"{scheme}://{node_address}:8000/v1",
+            "api_key": "none",
+        },
+        "model_info": {"managed_by": FLEET_MANAGED_BY},
+    }
+
+
+def _is_fleet_managed(entry: Any) -> bool:
+    return isinstance(entry, dict) and (entry.get("model_info") or {}).get("managed_by") == FLEET_MANAGED_BY
+
+
+def _restart_litellm(run_fn=None, platform_sh=None) -> Dict[str, Any]:
+    script = platform_sh or os.getenv(
+        "SYSADMIN_PLATFORM_SH",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../platform.sh")),
+    )
+    command = [script, "service", "litellm", "restart"]
+    cwd = os.path.dirname(script)
+    try:
+        proc = (run_fn or _default_run_fn)(command, cwd)
+        return {
+            "exit_code": getattr(proc, "returncode", None),
+            "output": (getattr(proc, "stdout", "") or "")[-4000:],
+        }
+    except Exception as exc:
+        return {"exit_code": None, "error": str(exc)}
+
+
+def sync_from_fleet(
+    placements,
+    config_path: Optional[str] = None,
+    restart: bool = True,
+    run_fn: Optional[Callable[[list, str], Any]] = None,
+    platform_sh: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Rewrite the fleet-managed model_list block from healthy placements.
+
+    `placements` is an iterable of ``(model_name, node_address)`` pairs for
+    healthy nodes (typically from ``FleetRegistry.healthy_nodes()`` joined
+    with the scheduler's assignments). One LiteLLM entry is generated per
+    (model × node) under the same ``model_name`` so the existing
+    ``least-busy`` routing strategy spreads load across nodes.
+
+    Only entries tagged ``model_info.managed_by = "sysadmin-fleet-manager"``
+    are rewritten; hand-written entries and the local model manager's own
+    block (``"sysadmin-model-manager"``) are preserved byte-for-byte.
+    """
+    path = config_path or default_config_path()
+    with open(path, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+
+    seen = set()
+    fleet_entries = []
+    by_model: Dict[str, list] = {}
+    for model_name, node_address in placements or []:
+        model_name = registry_module.validate_name(model_name)
+        node_address = validate_node_address(node_address)
+        key = (model_name, node_address)
+        if key in seen:
+            continue
+        seen.add(key)
+        fleet_entries.append(_fleet_managed_entry(model_name, node_address))
+        by_model.setdefault(model_name, []).append(node_address)
+    fleet_entries.sort(key=lambda entry: (
+        entry["model_name"], entry["litellm_params"]["api_base"]))
+
+    entries = config.get("model_list") or []
+    base = [entry for entry in entries if not _is_fleet_managed(entry)]
+    new_entries = base + fleet_entries
+
+    changed = ([(entry.get("model_name"), (entry.get("litellm_params") or {}).get("api_base"))
+                for entry in entries if _is_fleet_managed(entry)]
+               != [(entry["model_name"], entry["litellm_params"]["api_base"])
+                   for entry in fleet_entries])
+    if changed:
+        config["model_list"] = new_entries
+        _atomic_write_yaml(path, config)
+
+    result: Dict[str, Any] = {"changed": changed, "models": by_model, "restart": None}
+    if changed and restart:
+        result["restart"] = _restart_litellm(run_fn=run_fn, platform_sh=platform_sh)
+    return result
+
+
+def fleet_managed_model_names(config_path: Optional[str] = None) -> list:
+    path = config_path or default_config_path()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+    except OSError:
+        return []
+    return [entry.get("model_name") for entry in (config.get("model_list") or []) if _is_fleet_managed(entry)]

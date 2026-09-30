@@ -1,16 +1,17 @@
 #!/usr/sbin/nft -f
-# Firewall ruleset for the INFERENCE (GPU) host — multi-host split (PR-H1).
+# Firewall ruleset for the INFERENCE (GPU) host — GPU-fleet split (Phase B).
 #
 # NOT applied by the installer. Review the peer addresses and interface name,
 # then load explicitly:
 #     nft -f backend/config/firewall/inference.nft
 #
-# Policy: default-deny. Only W may reach LiteLLM (:4000); LiteLLM's in-process
-# auth reaches Valkey/VictoriaLogs on D. inference_engine/vLLM stay loopback.
+# Policy: default-deny. Only the platform host may reach the inference engine
+# (:8000) and the node-agent (:8001). The node reaches out to the platform for
+# fleet register/heartbeat (:3080) and audit outbox replay (:9428).
+# inference_engine -> vLLM/llama.cpp stay loopback.
 
-define LAN_IFACE         = "eth0"
-define PEER_WEB_IP       = 10.0.0.10   # W — the only host allowed to call LiteLLM
-define PEER_DATA_IP      = 10.0.0.12   # D — Valkey :6379, VictoriaLogs :9428
+define LAN_IFACE       = "eth0"
+define PEER_PLATFORM_IP = 10.0.0.20   # P — fleet API :3080, VictoriaLogs :9428
 
 table inet sysadmin {
   chain input {
@@ -19,8 +20,8 @@ table inet sysadmin {
     ct state established,related accept
     iif lo accept
 
-    # Only W may call LiteLLM. inference_engine (:8000) and vLLM stay loopback.
-    ip saddr $PEER_WEB_IP tcp dport 4000 accept
+    # Only the platform host may call the engine and the node-agent.
+    ip saddr $PEER_PLATFORM_IP tcp dport { 8000, 8001 } accept
   }
 
   chain output {
@@ -29,7 +30,10 @@ table inet sysadmin {
     ct state established,related accept
     oif lo accept
 
-    # LiteLLM's in-process custom_auth / quota / audit needs D.
-    ip daddr $PEER_DATA_IP tcp dport { 6379, 9428 } accept
+    # Fleet register/heartbeat and audit outbox replay, both to the platform.
+    ip daddr $PEER_PLATFORM_IP tcp dport { 3080, 9428 } accept
+    # Model weight downloads (Hugging Face, :443) need outbound HTTPS: open it
+    # during provisioning only, then close it again.
+    # ip daddr 0.0.0.0/0 tcp dport 443 accept
   }
 }

@@ -243,7 +243,7 @@ def test_role_matrix_lists_each_role_services(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "* web        auth_gateway agent_tools audit_outbox traefik harness_gateway" in result.stdout
     assert "  data       valkey victorialogs seaweedfs" in result.stdout
-    assert "  inference  litellm inference audit_outbox" in result.stdout
+    assert "  inference  inference audit_outbox node_agent" in result.stdout
 
 
 def test_status_lists_only_this_roles_services(tmp_path):
@@ -378,7 +378,7 @@ def test_installer_dry_run_lists_the_services_each_role_runs(tmp_path):
         (("--role", "web"), "needs this machine's LAN address"),
         (("--role", "web", "--lan-bind-ip", "10.0.0.10"), "needs the inference host"),
         (("--role", "web", "--lan-bind-ip", "10.0.0.10", "--peer-inference", "10.0.0.11"), "needs the data host"),
-        (("--role", "inference", "--lan-bind-ip", "10.0.0.10"), "needs the data host"),
+        (("--role", "inference", "--lan-bind-ip", "10.0.0.10"), "needs the platform URL"),
         (
             ("--role", "web", "--lan-bind-ip", "127.0.0.1", "--peer-inference", "10.0.0.11", "--peer-data", "10.0.0.12"),
             "needs this machine's LAN address",
@@ -432,7 +432,7 @@ def test_tui_role_validation_matches_the_installer_rules():
     assert "inference host" in validate_role_config(
         {"role": "web", "lan_bind_ip": "10.0.0.10", "peer_inference_host": "127.0.0.1", "peer_data_host": "10.0.0.12"}
     )
-    assert "data host" in validate_role_config(
+    assert "platform URL" in validate_role_config(
         {"role": "inference", "lan_bind_ip": "10.0.0.11", "peer_data_host": "localhost"}
     )
     assert (
@@ -498,8 +498,12 @@ def test_tui_records_a_split_role_with_its_peers(tmp_path):
         "peer_data_valkey_port": 6379,
         "peer_data_logs_port": 9428,
         "peer_data_seaweedfs_port": 8333,
+        "platform_url": "https://10.0.0.20:3080",
+        "node_name": "gpu-01",
     }
     recorded = pathlib.Path(write_deployment_env(cfg, str(tmp_path))).read_text(encoding="utf-8")
     assert "ROLE=inference" in recorded
     assert "LAN_BIND_IP=10.0.0.11" in recorded
+    assert "PLATFORM_URL=https://10.0.0.20:3080" in recorded
+    assert "NODE_NAME=gpu-01" in recorded
     assert "PEER_DATA_HOST=10.0.0.12" in recorded

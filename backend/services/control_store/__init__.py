@@ -34,6 +34,7 @@ from services.control_store.errors import (
     ControlStoreUnavailable,
 )
 from services.control_store.executor import Executor, SingleConnectionExecutor, open_executor
+from services.control_store.fleet_registry import FleetRegistry
 from services.control_store.key_store import KeyStore, generate_token, hash_token
 from services.control_store.ledger import DurableTokenLedger
 from services.control_store.schema import SCHEMA_VERSION, apply_schema
@@ -48,6 +49,7 @@ __all__ = [
     "ControlStoreUnavailable",
     "DurableTokenLedger",
     "Executor",
+    "FleetRegistry",
     "KeyStore",
     "SingleConnectionExecutor",
     "apply_schema",
@@ -56,6 +58,7 @@ __all__ = [
     "hash_token",
     "health",
     "open_executor",
+    "open_fleet_registry",
     "open_key_store",
     "open_token_ledger",
     "password_path",
@@ -92,6 +95,15 @@ def open_token_ledger(
     """Return the durable token ledger, or None when file mode is configured."""
     handle = _executor_for(env, executor)
     return DurableTokenLedger(handle) if handle is not None else None
+
+
+def open_fleet_registry(
+    env: Optional[Mapping[str, str]] = None,
+    executor: Optional[Executor] = None,
+) -> Optional[FleetRegistry]:
+    """Return the GPU fleet registry, or None when file mode is configured."""
+    handle = _executor_for(env, executor)
+    return FleetRegistry(handle) if handle is not None else None
 
 
 def health(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:

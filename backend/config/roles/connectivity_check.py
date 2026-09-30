@@ -17,8 +17,12 @@ check leaves the machine exactly as it was.
 import os
 import socket
 import sys
+from urllib.parse import urlparse
 
 # role -> list of (label, host_env_key, port_env_key) the role must reach.
+# The Phase-B `inference` (GPU node) role reaches the platform instead of a
+# `data` peer: its fleet API endpoint comes from PLATFORM_URL (parsed below),
+# and its audit outbox replays to the platform's VictoriaLogs.
 _REQUIRED = {
     "web": [
         ("LiteLLM (inference peer)", "PEER_INFERENCE_HOST", "PEER_INFERENCE_PORT"),
@@ -27,9 +31,9 @@ _REQUIRED = {
         ("VictoriaLogs (data peer)", "PEER_DATA_HOST", "PEER_DATA_LOGS_PORT"),
     ],
     "inference": [
-        ("Valkey (data peer)", "PEER_DATA_HOST", "PEER_DATA_VALKEY_PORT"),
-        ("VictoriaLogs (data peer)", "PEER_DATA_HOST", "PEER_DATA_LOGS_PORT"),
+        ("VictoriaLogs (platform)", "PEER_DATA_HOST", "PEER_DATA_LOGS_PORT"),
     ],
+    "platform": [],
     "data": [],
     "all": [],
 }
@@ -44,7 +48,22 @@ _DEFAULTS = {
 }
 
 # Keys the environment may supply or override.
-_ENV_KEYS = ("ROLE", "LAN_BIND_IP") + tuple(_DEFAULTS)
+_ENV_KEYS = ("ROLE", "LAN_BIND_IP", "PLATFORM_URL", "NODE_NAME",
+             "PEER_INFERENCE_HOSTS") + tuple(_DEFAULTS)
+
+
+def platform_api_target(env):
+    """(label, host, port) for the fleet API a GPU node registers to.
+
+    Parsed from PLATFORM_URL (e.g. ``https://<platform-lan-ip>:3080``); an
+    absent port defaults to 3080, the agent platform's fleet API port. An empty
+    URL yields an empty host, which the TCP probe reports as unreachable — the
+    installer already fails closed earlier with a clearer message.
+    """
+    parsed = urlparse((env.get("PLATFORM_URL") or "").strip())
+    host = parsed.hostname or ""
+    port = parsed.port or 3080
+    return ("Platform fleet API (register/heartbeat)", host, str(port))
 
 
 def parse_env_file(path):
@@ -87,6 +106,8 @@ def required_targets(role, env):
         host = env.get(host_key, _DEFAULTS[host_key])
         port = env.get(port_key, _DEFAULTS[port_key])
         targets.append((label, host, port))
+    if role == "inference":
+        targets.append(platform_api_target(env))
     return targets
 
 
@@ -111,9 +132,13 @@ def main(argv=None):
         print(f"Connectivity check FAILED for role '{role}':", file=sys.stderr)
         for label, host, port in failures:
             print(f"  - cannot reach {label} at {host}:{port}", file=sys.stderr)
+        staged = {
+            "platform": "platform first, then the GPU nodes",
+            "inference": "the platform host first, then this GPU node",
+        }.get(role, "staged order D -> I -> W")
         print(
             "Aborting: no configuration was applied. Bring the peer services "
-            "up (staged order D -> I -> W) and verify the firewall rules, then "
+            f"up ({staged}) and verify the firewall rules, then "
             "re-run the installer.",
             file=sys.stderr,
         )

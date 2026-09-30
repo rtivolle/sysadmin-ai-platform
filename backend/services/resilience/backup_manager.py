@@ -213,6 +213,39 @@ class BackupManager:
             "aggregate_sha256": compute_dir_sha256(keys_dest),
         }
 
+    def snapshot_postgres_pitr(self) -> Dict[str, Any]:
+        """Records Postgres PITR metadata in the platform backup manifest.
+
+        The base backups and WAL segments themselves live in the PITR
+        destination (``SYSADMIN_PG_PITR_DEST``, often off-host) and are NOT
+        copied into the platform archive; this records which base backup and
+        how many WAL segments exist so a point-in-time restore can be planned
+        from the manifest alone. Returns ``{"configured": False}`` when no
+        PITR destination has been initialised yet, in which case the caller
+        omits the component entirely.
+        """
+        from .pg_pitr_backup import DEFAULT_PITR_DEST, latest_base_label
+
+        dest = DEFAULT_PITR_DEST
+        label = latest_base_label(dest)
+        if label is None:
+            return {"configured": False}
+        wal_dir = dest / "wal"
+        wal_count = len(list(wal_dir.iterdir())) if wal_dir.is_dir() else 0
+        manifest_path = dest / "base" / label / "pitr-manifest.json"
+        manifest_sha = compute_sha256(manifest_path) if manifest_path.is_file() else None
+        return {
+            "configured": True,
+            "mode": "metadata_reference",
+            "dest": str(dest),
+            "latest_base_label": label,
+            "pitr_manifest_sha256": manifest_sha,
+            "wal_segments_archived": wal_count,
+            "note": "base backups + WAL segments stay in the PITR destination; "
+                    "restore with: python -m backend.services.resilience.pg_pitr_backup "
+                    "restore --target-time '<ISO>'",
+        }
+
     def create_backup(
         self,
         backup_id: Optional[str] = None,
@@ -241,19 +274,25 @@ class BackupManager:
             vl_meta = self.snapshot_victorialogs(staging_dir)
             sw_meta = self.snapshot_seaweedfs(staging_dir)
             keys_meta = self.snapshot_config_keys(staging_dir)
+            pitr_meta = self.snapshot_postgres_pitr()
 
             # 2. Build Manifest
+            components = {
+                "valkey": valkey_meta,
+                "victorialogs": vl_meta,
+                "seaweedfs": sw_meta,
+                "config_keys": keys_meta,
+            }
+            # Only present once a PITR destination has been initialised, so
+            # existing manifests (and their tests) are unchanged otherwise.
+            if pitr_meta.get("configured"):
+                components["postgres_pitr"] = pitr_meta
             manifest = {
                 "backup_id": bid,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
                 "created_at_epoch": now,
                 "platform_version": "2.0.0",
-                "components": {
-                    "valkey": valkey_meta,
-                    "victorialogs": vl_meta,
-                    "seaweedfs": sw_meta,
-                    "config_keys": keys_meta,
-                },
+                "components": components,
             }
 
             manifest_file = staging_dir / "manifest.json"

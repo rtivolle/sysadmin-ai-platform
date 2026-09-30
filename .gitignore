@@ -21,6 +21,8 @@ backend/tests/fixtures/logs/massive_access_5gb.log
 backend/config/keys/*.key
 backend/config/keys/login-credentials.json
 backend/config/keys/initial-passwords.txt
+# Fleet CA material (private keys, CSRs, CA database, CRLs) — never committed.
+backend/config/keys/fleet/
 *.env
 .env*
 

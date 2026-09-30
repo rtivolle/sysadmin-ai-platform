@@ -24,6 +24,12 @@
 #
 # Every outcome is appended as one JSON line to backend/logs/update.log.
 #
+# Ordered patching (spec P1.13): role-aware via backend/config/roles/deployment.env.
+# Role 'inference' drains the GPU node before the update (node-agent :8001/drain,
+# then the platform fleet API — both best-effort) and verifies rejoin after the
+# restart; role 'platform' gets a pre-update backup-age reminder. GPU nodes are
+# always patched before the platform node, one at a time.
+#
 # Exit codes: 0 success / up to date, 1 updates available (--check only),
 #             2 failure or refusal.
 # ==============================================================================
@@ -146,6 +152,82 @@ running_services() {
 }
 
 # ---------------------------------------------------------------------------
+# Ordered patching helpers (spec P1.13). All best-effort and defensive: the
+# fleet APIs may not exist yet on this checkout, and update.sh must never fail
+# an update because an optional drain endpoint is unreachable.
+# ---------------------------------------------------------------------------
+
+# Ask this GPU node to drain (stop taking new inference traffic) before its
+# code is touched. Returns 0 when a drain was accepted, 1 otherwise.
+drain_inference_node() {
+  command -v curl >/dev/null 2>&1 || return 1
+  local body
+  # 1. Local node-agent drain endpoint (loopback).
+  if body="$(curl -sS -m 5 -X POST http://127.0.0.1:8001/drain 2>/dev/null)"; then
+    case "$body" in
+      *drain*) echo "  [i] node-agent accepted the drain request."; return 0 ;;
+    esac
+  fi
+  # 2. Platform fleet API, when this node knows the platform URL, its fleet
+  #    name, and its mTLS client identity.
+  if [ -n "$PLATFORM_URL" ] && [ -n "$FLEET_NODE_NAME" ]; then
+    local cert="" key="" ca=""
+    for cand in "${KEYS_DIR}/fleet/certs/${FLEET_NODE_NAME}.crt"; do
+      [ -f "$cand" ] && cert="$cand"
+    done
+    for cand in "${KEYS_DIR}/fleet/private/${FLEET_NODE_NAME}.key"; do
+      [ -f "$cand" ] && key="$cand"
+    done
+    [ -f "${KEYS_DIR}/fleet/ca.crt" ] && ca="${KEYS_DIR}/fleet/ca.crt"
+    if [ -n "$cert" ] && [ -n "$key" ] && [ -n "$ca" ]; then
+      if body="$(curl -sS -m 10 --cert "$cert" --key "$key" --cacert "$ca" \
+          -X POST "${PLATFORM_URL}/fleet/nodes/${FLEET_NODE_NAME}/drain" 2>/dev/null)"; then
+        case "$body" in
+          *drain*) echo "  [i] platform fleet API accepted the drain request."; return 0 ;;
+        esac
+      fi
+    fi
+  fi
+  return 1
+}
+
+# Warn when the platform node has no recent backup. Never blocks: the operator
+# already confirmed, and backups may live off-host where we cannot see them.
+pre_update_backup_check() {
+  local newest=""
+  newest="$(ls -t "${BACKEND_DIR}/data/backups"/*.tar.gz 2>/dev/null | head -n 1 || true)"
+  if [ -z "$newest" ]; then
+    warn "no platform backup found under backend/data/backups/ — take one before patching (spec §8.2)."
+    return 0
+  fi
+  local age_now age_file age_h
+  age_now="$(date +%s)"
+  age_file="$(stat -c %Y "$newest" 2>/dev/null || stat -f %m "$newest" 2>/dev/null || echo 0)"
+  age_h="$(( (age_now - age_file) / 3600 ))"
+  if [ "$age_h" -gt 26 ]; then
+    warn "newest platform backup is ${age_h}h old (> 26h) — take a fresh backup before patching (spec §8.2)."
+  else
+    say "newest platform backup: ${age_h}h old — OK."
+  fi
+}
+
+# After an inference-node update, wait (bounded) for the node-agent to answer
+# again. The platform re-integrates the node automatically on the next healthy
+# heartbeat (spec §7.4); there is no manual rejoin step.
+verify_inference_rejoin() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local i
+  for i in $(seq 1 12); do
+    if curl -sS -m 3 http://127.0.0.1:8001/healthz >/dev/null 2>&1; then
+      say "node-agent is healthy again; the platform re-integrates this node on its next heartbeat."
+      return 0
+    fi
+    sleep 5
+  done
+  warn "node-agent did not answer :8001/healthz within 60s — check './platform.sh status' and the fleet registry."
+}
+
+# ---------------------------------------------------------------------------
 # 1. Preflight: this is a platform checkout, with secrets, on a safe tree.
 # ---------------------------------------------------------------------------
 [ -f "$INSTALL_SH" ] || fail preflight "install.sh not found; update.sh must run from the repository root."
@@ -161,6 +243,27 @@ fi
 for key in master valkey-password; do
   [ -s "${KEYS_DIR}/${key}.key" ] || fail preflight "missing ${KEYS_DIR}/${key}.key — run ./install.sh before updating."
 done
+
+# ---------------------------------------------------------------------------
+# 1b. Role detection (once, early): drives ordered patching (spec P1.13) and
+# the post-update secret invariants. deployment.env is parsed, never sourced.
+# ---------------------------------------------------------------------------
+DEPLOYMENT_ENV="${BACKEND_DIR}/config/roles/deployment.env"
+ROLE="all"
+PLATFORM_URL=""
+FLEET_NODE_NAME=""
+if [ -f "$DEPLOYMENT_ENV" ]; then
+  recorded_role="$(sed -n 's/^ROLE=//p' "$DEPLOYMENT_ENV" | tail -n 1)"
+  [ -n "$recorded_role" ] && ROLE="$recorded_role"
+  recorded_platform_url="$(sed -n 's/^PLATFORM_URL=//p' "$DEPLOYMENT_ENV" | tail -n 1)"
+  [ -n "$recorded_platform_url" ] && PLATFORM_URL="$recorded_platform_url"
+  for _k in FLEET_NODE_NAME NODE_NAME; do
+    _v="$(sed -n "s/^${_k}=//p" "$DEPLOYMENT_ENV" | tail -n 1)"
+    if [ -n "$_v" ]; then FLEET_NODE_NAME="$_v"; break; fi
+  done
+  unset _k _v recorded_platform_url
+fi
+say "Machine role: ${ROLE}${PLATFORM_URL:+ (platform: ${PLATFORM_URL})}"
 
 GIT_REPO=0
 if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -251,6 +354,12 @@ if [ "$DRY_RUN" = 1 ]; then
     exit 0
   fi
   echo "  would run: ./install.sh${SKIP_VLLM:+ --skip-vllm}"
+  if [ "$ROLE" = "inference" ] && [ "$SKIP_RESTART" != 1 ]; then
+    echo "  would drain this GPU node first (node-agent :8001/drain, then platform fleet API)"
+  fi
+  if { [ "$ROLE" = "platform" ] || [ "$ROLE" = "all" ]; } && [ "$SKIP_RESTART" != 1 ]; then
+    echo "  pre-update: backup-age check (warning only)"
+  fi
   [ -f "$HARNESS_INSTALLER" ] && echo "  would run: ${HARNESS_INSTALLER}"
   if [ "$SKIP_RESTART" = 1 ]; then
     echo "  services: untouched (--skip-restart)"
@@ -283,6 +392,24 @@ if [ "$ASSUME_YES" != 1 ]; then
     y|Y|yes|YES) ;;
     *) echo "Aborted by operator."; exit 0 ;;
   esac
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. Role-aware pre-update (ordered patching, spec P1.13): GPU nodes are
+# drained before their code is touched; the platform node gets a pre-update
+# backup reminder. Best-effort and defensive — a missing drain endpoint only
+# warns, it never blocks the update.
+# ---------------------------------------------------------------------------
+if [ "$SKIP_RESTART" != 1 ]; then
+  if [ "$ROLE" = "inference" ]; then
+    say "Draining this GPU node before the update (ordered patching)..."
+    if ! drain_inference_node; then
+      warn "no drain endpoint answered (node-agent :8001 and platform fleet API unreachable); services will be stopped directly."
+    fi
+  elif [ "$ROLE" = "platform" ] || [ "$ROLE" = "all" ]; then
+    say "Pre-update backup check (platform role)..."
+    pre_update_backup_check
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -350,14 +477,7 @@ fi
 # exist and be non-empty. A split host holds only its own subset
 # (docs/multi-host.md §3): the data tier has no LiteLLM master key by design,
 # so demanding it here would fail every update on D.
-DEPLOYMENT_ENV="${BACKEND_DIR}/config/roles/deployment.env"
-ROLE="all"
-if [ -f "$DEPLOYMENT_ENV" ]; then
-  recorded_role="$(sed -n 's/^ROLE=//p' "$DEPLOYMENT_ENV" | tail -n 1)"
-  if [ -n "$recorded_role" ]; then
-    ROLE="$recorded_role"
-  fi
-fi
+# (ROLE was detected once in §1b.)
 case "$ROLE" in
   data) REQUIRED_KEY_FILES="valkey-password" ;;
   *)    REQUIRED_KEY_FILES="master valkey-password" ;;
@@ -388,6 +508,10 @@ fi
 # ---------------------------------------------------------------------------
 # 8. Success: audit log + summary.
 # ---------------------------------------------------------------------------
+if [ "$SKIP_RESTART" != 1 ] && [ -n "$RESTARTED" ] && [ "$ROLE" = "inference" ]; then
+  say "Verifying this GPU node rejoins the fleet..."
+  verify_inference_rejoin
+fi
 restarted_json="[]"
 if [ -n "$RESTARTED" ]; then
   restarted_json="["

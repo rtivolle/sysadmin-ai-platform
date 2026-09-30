@@ -2,6 +2,44 @@
 
 Last checked: 2026-09-25. Run tests with `backend/.venv/bin/python3 -m pytest -q` from the repository root.
 
+## GPU fleet management — feature/gpu-fleet-management (2026-09-30)
+
+- **Documentation lane (this entry, no code).** Recorded the design decisions
+  driving this branch: [ADR-0015](docs/decisions/ADR-0015-two-role-platform-inference-split.md)
+  (two-role `platform`/`inference` split vs the PR-H1 three-role `web`/
+  `inference`/`data` topology; LiteLLM moves to the platform node so Valkey
+  stays loopback-only and GPU nodes carry no user secrets; `web`/`data` roles
+  kept for compatibility) and [ADR-0016](docs/decisions/ADR-0016-gpu-fleet-control-loop.md)
+  (fleet control loop: auto-registration, `pending` + human approval,
+  declarative desired state, bin-packing scheduler, heartbeat-delta
+  convergence, dynamic LiteLLM `model_list`, health/drain; mTLS at the
+  handshake from day 1 with the honest limitation that uvicorn does not
+  expose the client certificate to the ASGI scope, so no in-app CN check).
+  `docs/plans/PRODUCTION_READINESS.md`: PR-H1 marked superseded by ADR-0015,
+  new items PR-F1 (fleet registry) → PR-F5 (backups + PITR + first restore
+  drill) added with P1 priorities and tracking rows.
+- **Implementation lanes (other workers, same branch, in flight).** At the
+  time of writing the working tree holds uncommitted in-flight work outside
+  this entry's scope: the `node_agent` scaffold
+  (`backend/services/node_agent/`), fleet CA tooling
+  (`backend/services/resilience/fleet-ca.sh`, `fleet_ca.py`), and the
+  platform/inference role, mTLS and backup work. Their tests and measurements
+  are recorded by those lanes, not here.
+- **Test scope for this branch (planned, per the ADRs):** unit tests for the
+  fleet state machine (register → pending → approve → active → stale →
+  drained → retired), scheduler bin-packing over heartbeat-reported VRAM,
+  idempotent hash-gated `model_list` regeneration, mTLS handshake behaviour
+  (plaintext refused, wrong-CA rejected, CRL revocation), and a no-user-secret
+  inventory assertion on the node. Running those suites belongs to the
+  implementing lanes.
+- **Not measured.** Real multi-host bring-up (platform + inference nodes),
+  hot LiteLLM reload behaviour on the pinned version (hot admin reload vs
+  fast loopback restart, interruption window), stale/drain/decommission
+  transitions on real machines, failover, the PITR restore drill, and
+  scheduler behaviour under VRAM pressure. These are the open acceptance
+  items PR-F1–PR-F5. No test runs were performed for this documentation-only
+  change.
+
 ## Machine-role install: one host or a three-machine split (2026-09-25)
 
 - **What changed.** The topology is now a first-class install-time choice:

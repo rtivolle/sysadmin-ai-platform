@@ -47,6 +47,11 @@ if [ -f "$DEPLOYMENT_ENV" ]; then
 fi
 ROLE="${ROLE:-all}"
 
+# Published to every service this script starts. agent_tools uses it to pick
+# its FastAPI routers (the fleet API lives on platform, the node-agent API on
+# inference); node_agent and litellm_sync read it for role-specific behaviour.
+export SYSADMIN_ROLE="$ROLE"
+
 # Outward-facing bind address: loopback for single-host `all`, the machine's
 # LAN address otherwise. Traefik keeps binding every interface (front door) and
 # is restricted by backend/config/firewall/web.nft instead.
@@ -58,24 +63,49 @@ fi
 # Peer addresses used to build VALKEY_URL / VICTORIALOGS_URL / LITELLM_URL.
 PEER_INFERENCE_HOST="${PEER_INFERENCE_HOST:-127.0.0.1}"
 PEER_INFERENCE_PORT="${PEER_INFERENCE_PORT:-4000}"
+# Comma-separated bootstrap list of GPU nodes (platform role only). The fleet
+# registry replaces this static list once nodes register; it may be empty.
+PEER_INFERENCE_HOSTS="${PEER_INFERENCE_HOSTS:-}"
 PEER_DATA_HOST="${PEER_DATA_HOST:-127.0.0.1}"
 PEER_DATA_VALKEY_PORT="${PEER_DATA_VALKEY_PORT:-6379}"
 PEER_DATA_LOGS_PORT="${PEER_DATA_LOGS_PORT:-9428}"
 PEER_DATA_SEAWEEDFS_PORT="${PEER_DATA_SEAWEEDFS_PORT:-8333}"
+# Base URL of the platform fleet API (inference role: where node_agent
+# registers and heartbeats). Empty everywhere else.
+PLATFORM_URL="${PLATFORM_URL:-}"
+# Fleet identity of this node (CN of its client certificate, provisioned by
+# install.sh via fleet-ca.sh). Defaults to the machine hostname.
+NODE_NAME="${NODE_NAME:-$(hostname 2>/dev/null || echo gpu-node)}"
 
 # Canonical start order (dependencies first); role filtering selects a subset.
 # harness_gateway is intentionally absent: it is opt-in via `platform.sh harness`.
-SERVICE_START_ORDER="valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik"
+# node_agent sits with the inference services; litellm_sync runs after the
+# LiteLLM proxy whose config.yaml it regenerates from the fleet registry.
+SERVICE_START_ORDER="valkey victorialogs audit_outbox seaweedfs inference node_agent auth_gateway agent_tools litellm litellm_sync traefik"
 
 # Services this host's role owns (shown in status, stopped on stop).
+#
+# `platform` is the data+admin tier of the GPU-fleet split (Phase B): it owns
+# the state services, the agent platform, the LiteLLM proxy (moved here from
+# the PR-H1 inference role) and the fleet control loop (litellm_sync).
+# `inference` is a GPU node: the engine, its local audit outbox and the
+# node-agent that registers/heartbeats to the platform. It is secretless by
+# design (no LiteLLM, no user keys, no Valkey client).
+# `all` is the single-host dev role and keeps its exact service set, plus the
+# two fleet services: node_agent (loopback, harmless without a platform) and
+# litellm_sync (skipped at start when no Postgres control store is
+# configured — see start_one).
+# `web` / `data` are the historical PR-H1 roles, kept unchanged for
+# compatibility.
 role_services() {
   case "$ROLE" in
-    all)        echo "valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik harness_gateway" ;;
+    all)        echo "valkey victorialogs audit_outbox seaweedfs inference node_agent auth_gateway agent_tools litellm litellm_sync traefik harness_gateway" ;;
     web)        echo "auth_gateway agent_tools audit_outbox traefik harness_gateway" ;;
-    inference)  echo "litellm inference audit_outbox" ;;
+    inference)  echo "inference audit_outbox node_agent" ;;
     data)       echo "valkey victorialogs seaweedfs" ;;
+    platform)   echo "valkey victorialogs audit_outbox seaweedfs auth_gateway agent_tools litellm litellm_sync traefik harness_gateway" ;;
     *)
-      echo "Unknown role: ${ROLE} (expected all|web|inference|data)" >&2
+      echo "Unknown role: ${ROLE} (expected all|web|inference|data|platform)" >&2
       return 1
       ;;
   esac
@@ -104,9 +134,26 @@ export_peer_urls() {
   export SYSADMIN_VALKEY_HOST SYSADMIN_VALKEY_PORT
   export SYSADMIN_SEAWEEDFS_HOST SYSADMIN_SEAWEEDFS_PORT SYSADMIN_SEAWEEDFS_MASTER_PORT
   export SYSADMIN_INFERENCE_LOCAL
+  export PEER_INFERENCE_HOSTS PLATFORM_URL NODE_NAME
   VICTORIALOGS_URL="http://${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
-  LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
-  SYSADMIN_LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
+  # Where LiteLLM lives depends on the topology: `platform` serves it on
+  # loopback by design (architecture §5 — the agent runtime calls it locally);
+  # `all` and the historical `web` role keep the previous peer/loopback
+  # behaviour; a GPU `inference` node runs no LiteLLM, so no peer URL is
+  # exported there at all.
+  case "$ROLE" in
+    platform|all)
+      LITELLM_URL="http://127.0.0.1:4000/v1"
+      SYSADMIN_LITELLM_URL="http://127.0.0.1:4000/v1"
+      ;;
+    inference)
+      unset LITELLM_URL SYSADMIN_LITELLM_URL
+      ;;
+    *)
+      LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
+      SYSADMIN_LITELLM_URL="http://${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}/v1"
+      ;;
+  esac
   VALKEY_HOST="${PEER_DATA_HOST}"
   VALKEY_PORT="${PEER_DATA_VALKEY_PORT}"
   SYSADMIN_VALKEY_HOST="${PEER_DATA_HOST}"
@@ -131,7 +178,7 @@ if [ -z "${VLLM_BIN:-}" ] && [ -x "${VLLM_VENV_DIR}/bin/vllm" ]; then
   export VLLM_BIN="${VLLM_VENV_DIR}/bin/vllm"
 fi
 
-SERVICE_NAMES="valkey victorialogs audit_outbox seaweedfs inference auth_gateway agent_tools litellm traefik harness_gateway"
+SERVICE_NAMES="valkey victorialogs audit_outbox seaweedfs inference node_agent auth_gateway agent_tools litellm litellm_sync traefik harness_gateway"
 
 is_running() {
   local pid_file="$1"
@@ -213,12 +260,21 @@ status_service() {
 }
 
 # Secrets this role actually needs (docs/multi-host.md §3):
-#   all | web | inference -> master.key + valkey-password.key
+#   all | web | platform -> master.key + valkey-password.key
 #   data                  -> valkey-password.key only. The state tier holds no
 #                            LiteLLM key by design, so demanding master.key here
 #                            made the data host unable to start at all.
+#   inference             -> neither. A GPU node is secretless by design: the
+#                            node-agent authenticates with its fleet client
+#                            certificate, and nothing on the node touches
+#                            Valkey, so demanding either key would make an
+#                            unattended GPU install unable to start.
 role_needs_master_key() {
-  case "$ROLE" in all|web|inference) return 0 ;; *) return 1 ;; esac
+  case "$ROLE" in all|web|platform) return 0 ;; *) return 1 ;; esac
+}
+
+role_needs_valkey_password() {
+  case "$ROLE" in all|web|platform|data) return 0 ;; *) return 1 ;; esac
 }
 
 # Interpreter for the small runtime-config render below. `data` installs only
@@ -246,21 +302,23 @@ load_secrets() {
     LITELLM_MASTER_KEY="$(cat "$master_key_file")"
   fi
 
-  if [ ! -s "$valkey_password_file" ]; then
-    echo "Missing Valkey password: $valkey_password_file." >&2
-    echo "Run ./install.sh on the web host, then copy it here (docs/multi-host.md §3)." >&2
-    return 1
+  if role_needs_valkey_password; then
+    if [ ! -s "$valkey_password_file" ]; then
+      echo "Missing Valkey password: $valkey_password_file." >&2
+      echo "Run ./install.sh on the web host, then copy it here (docs/multi-host.md §3)." >&2
+      return 1
+    fi
+    export VALKEY_PASSWORD VALKEY_URL
+    VALKEY_PASSWORD="$(cat "$valkey_password_file")"
+    # Valkey lives on the data peer (loopback for `all`); the password still
+    # comes from this machine's key file (see docs/multi-host.md §key-copy).
+    VALKEY_URL="redis://:${VALKEY_PASSWORD}@${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}/0"
   fi
-  export VALKEY_PASSWORD VALKEY_URL
-  VALKEY_PASSWORD="$(cat "$valkey_password_file")"
-  # Valkey lives on the data peer (loopback for `all`); the password still
-  # comes from this machine's key file (see docs/multi-host.md §key-copy).
-  VALKEY_URL="redis://:${VALKEY_PASSWORD}@${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}/0"
 
   # Only the host that serves Valkey renders the runtime config: every other
   # role reads the checked-in file only for reference and never starts Valkey.
   case "$ROLE" in
-    all|data)
+    all|data|platform)
       local python_bin
       python_bin="$(platform_python)"
       if [ -z "$python_bin" ]; then
@@ -301,7 +359,25 @@ start_one() {
         "-volume.port=8085"
       ;;
     inference)
-      start_service "inference" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/inference_engine/server.py" 8000
+      # The engine binds the machine's LAN address on the split roles so the
+      # platform's LiteLLM can reach it; on `all` LAN_BIND_IP is loopback, so
+      # single-host behaviour is unchanged. The firewall (inference.nft) is
+      # what restricts callers to the platform host.
+      INFERENCE_BIND_HOST="${INFERENCE_BIND_HOST:-${LAN_BIND_IP}}" \
+        start_service "inference" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/inference_engine/server.py" 8000
+      ;;
+    node_agent)
+      # Fleet node-agent (:8001): register + heartbeat + desired-state +
+      # model lifecycle on GPU nodes. The entrypoint is provided by the fleet
+      # worker; until it lands, skip gracefully instead of failing the whole
+      # start (keeps `all` working on a dev host mid-migration).
+      local node_agent_entrypoint="${SERVICES_DIR}/node_agent/server.py"
+      if [ ! -f "$node_agent_entrypoint" ]; then
+        echo "  [i] node_agent: ${node_agent_entrypoint} not installed yet (fleet work in progress); skipping."
+        return 0
+      fi
+      NODE_NAME="${NODE_NAME}" PLATFORM_URL="${PLATFORM_URL}" \
+        start_service "node_agent" "$VENV_PYTHON" "-u" "$node_agent_entrypoint" 8001
       ;;
     auth_gateway)
       start_service "auth_gateway" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/auth_gateway/server.py" 3081
@@ -310,11 +386,34 @@ start_one() {
       start_service "agent_tools" "$VENV_PYTHON" "-u" "${SERVICES_DIR}/agent_tools/server.py" "$AGENT_PORT"
       ;;
     litellm)
+      # LiteLLM is loopback-only on `platform` (and `all`): the agent runtime
+      # calls it locally and GPU nodes are reached through the generated
+      # model_list, never by inbound traffic to this port.
+      local litellm_bind="${LAN_BIND_IP}"
+      [ "$ROLE" = "platform" ] && litellm_bind="127.0.0.1"
       start_service "litellm" "$VENV_LITELLM" \
         "--config" "${CONFIG_DIR}/litellm/config.yaml" \
         "--port" "4000" \
-        "--host" "${LAN_BIND_IP}" \
+        "--host" "${litellm_bind}" \
         "--num_workers" "2"
+      ;;
+    litellm_sync)
+      # Fleet control-loop daemon (no port): regenerates LiteLLM's model_list
+      # from the fleet registry and reloads LiteLLM on change. It needs the
+      # Postgres control store, so on hosts without SYSADMIN_DATABASE_URL
+      # (dev `all`, historical roles) it stays inactive instead of failing
+      # the start. Missing entrypoint (fleet work in progress) skips the same
+      # graceful way.
+      if [ -z "${SYSADMIN_DATABASE_URL:-}" ]; then
+        echo "  [i] litellm_sync: no Postgres control store (SYSADMIN_DATABASE_URL unset); staying inactive."
+        return 0
+      fi
+      local litellm_sync_entrypoint="${SERVICES_DIR}/fleet/litellm_sync.py"
+      if [ ! -f "$litellm_sync_entrypoint" ]; then
+        echo "  [i] litellm_sync: ${litellm_sync_entrypoint} not installed yet (fleet work in progress); skipping."
+        return 0
+      fi
+      start_service "litellm_sync" "$VENV_PYTHON" "-u" "$litellm_sync_entrypoint"
       ;;
     traefik)
       start_service "traefik" "${BIN_DIR}/traefik" \
@@ -340,9 +439,11 @@ service_port() {
     audit_outbox) echo "-" ;;
     seaweedfs) echo "8333" ;;
     inference) echo "8000" ;;
+    node_agent) echo "8001" ;;
     auth_gateway) echo "3081" ;;
     agent_tools) echo "$AGENT_PORT" ;;
     litellm) echo "4000" ;;
+    litellm_sync) echo "-" ;;
     traefik) echo "8080" ;;
     harness_gateway) echo "3085" ;;
     *) return 1 ;;
@@ -416,7 +517,7 @@ stop_all() {
   # its per-user children reaped from the registry; on other roles these are
   # no-ops.
   local svc
-  for svc in harness_gateway traefik litellm agent_tools auth_gateway inference seaweedfs audit_outbox victorialogs valkey; do
+  for svc in harness_gateway traefik litellm_sync litellm agent_tools auth_gateway node_agent inference seaweedfs audit_outbox victorialogs valkey; do
     role_owns "$svc" || continue
     stop_service "$svc"
     [ "$svc" = "harness_gateway" ] && reap_harness_instances
@@ -435,8 +536,18 @@ peer_targets() {
       echo "victorialogs(data) ${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
       ;;
     inference)
-      echo "valkey(data) ${PEER_DATA_HOST}:${PEER_DATA_VALKEY_PORT}"
-      echo "victorialogs(data) ${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
+      # The GPU node registers/heartbeats to the platform fleet API and
+      # replays its audit outbox to the platform's VictoriaLogs.
+      echo "platform(fleet-api) ${PLATFORM_URL:-<unset>}"
+      echo "victorialogs(platform) ${PEER_DATA_HOST}:${PEER_DATA_LOGS_PORT}"
+      ;;
+    platform)
+      # GPU nodes register themselves; the static list is only the bootstrap.
+      local host
+      for host in ${PEER_INFERENCE_HOSTS//,/ }; do
+        [ -n "$host" ] || continue
+        echo "inference(gpu) ${host}:8000"
+      done
       ;;
   esac
 }
@@ -444,7 +555,7 @@ peer_targets() {
 show_status() {
   echo "=== Sysadmin AI Platform Service Status (role: ${ROLE}) ==="
   local svc
-  for svc in traefik litellm agent_tools auth_gateway inference seaweedfs audit_outbox victorialogs valkey harness_gateway; do
+  for svc in traefik litellm_sync litellm agent_tools auth_gateway node_agent inference seaweedfs audit_outbox victorialogs valkey harness_gateway; do
     role_owns "$svc" || continue
     status_one "$svc"
   done
@@ -611,6 +722,14 @@ run_tests() {
         wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_VALKEY_PORT" || true
         wait_for_port "$PEER_DATA_HOST" "$PEER_DATA_LOGS_PORT" || true
         ;;
+      platform)
+        # Bootstrap GPU hosts (the fleet registry replaces this static list).
+        local host
+        for host in ${PEER_INFERENCE_HOSTS//,/ }; do
+          [ -n "$host" ] || continue
+          wait_for_port "$host" 8000 || true
+        done
+        ;;
     esac
   fi
 
@@ -629,7 +748,7 @@ run_tests() {
 # dry run. The role of the *current* host is marked.
 show_role_matrix() {
   local role
-  for role in all web inference data; do
+  for role in all web inference data platform; do
     local marker=" "
     [ "$role" = "$ROLE" ] && marker="*"
     printf " %s %-10s %s\n" "$marker" "$role" "$(ROLE="$role" role_services)"

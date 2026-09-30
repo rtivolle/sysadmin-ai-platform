@@ -101,6 +101,33 @@ def test_data_valkey_loopback_bind_is_unchanged():
     assert render_config.render_valkey_conf("data", "", valkey) == valkey
 
 
+def test_platform_valkey_adds_lan_bind_like_data():
+    valkey = _read("valkey/valkey.conf")
+    out = render_config.render_valkey_conf("platform", "10.0.0.20", valkey)
+    assert "bind 127.0.0.1 10.0.0.20" in out
+    # inference still does not touch Valkey.
+    assert render_config.render_valkey_conf("inference", "10.0.0.21", valkey) == valkey
+
+
+def test_platform_dynamic_reverts_offbox_upstreams_to_loopback():
+    dynamic = _read("traefik/dynamic.yml")
+    env = {
+        "ROLE": "web",
+        "PEER_INFERENCE_HOST": "10.0.0.11",
+        "PEER_INFERENCE_PORT": "4000",
+        "PEER_DATA_HOST": "10.0.0.12",
+        "PEER_DATA_LOGS_PORT": "9428",
+        "PEER_DATA_SEAWEEDFS_PORT": "8333",
+    }
+    offbox = render_config.render_traefik_dynamic("web", env, dynamic)
+    assert "http://10.0.0.11:4000" in offbox
+    # The platform tier serves LiteLLM itself on loopback, so it behaves like
+    # `all`: peer-pointing upstreams are reverted.
+    back = render_config.render_traefik_dynamic("platform", {}, offbox)
+    assert "http://127.0.0.1:4000" in back
+    assert "http://10.0.0.11:4000" not in back
+
+
 def test_render_all_role_all_is_noop(tmp_path):
     (tmp_path / "valkey").mkdir()
     (tmp_path / "traefik").mkdir()
@@ -139,9 +166,10 @@ def test_render_all_web_rewrites_only_dynamic(tmp_path):
 # Firewall matrix (§4)
 # --------------------------------------------------------------------------- #
 
-def test_firewall_user_networks_reach_only_web():
-    # The user-facing LAN accept (iifname) exists only on web.
+def test_firewall_user_networks_reach_only_web_and_platform():
+    # The user-facing LAN accept (iifname) exists only on the front-door hosts.
     assert "iifname $LAN_IFACE" in _firewall("web.nft")
+    assert "iifname $LAN_IFACE" in _firewall("platform.nft")
     assert "iifname $LAN_IFACE" not in _firewall("inference.nft")
     assert "iifname $LAN_IFACE" not in _firewall("data.nft")
 
@@ -160,15 +188,33 @@ def test_firewall_web_front_door_only():
     assert "daddr $PEER_DATA_IP tcp dport { 6379, 8333, 9428 } accept" in out
 
 
-def test_firewall_inference_accepts_litellm_from_web_only():
+def test_firewall_inference_accepts_engine_from_platform_only():
     inp = _chain_body(_firewall("inference.nft"), "input")
     out = _chain_body(_firewall("inference.nft"), "output")
-    assert "saddr $PEER_WEB_IP tcp dport 4000 accept" in inp
-    # Exactly one inbound 4000 rule, restricted to W.
-    assert inp.count("dport 4000") == 1
-    assert "saddr $PEER_WEB_IP" in inp
-    # LiteLLM's in-process auth reaches Valkey + VictoriaLogs on D.
-    assert "daddr $PEER_DATA_IP tcp dport { 6379, 9428 } accept" in out
+    # Only the platform host may call the engine (:8000) and the node-agent
+    # (:8001).
+    assert "saddr $PEER_PLATFORM_IP tcp dport { 8000, 8001 } accept" in inp
+    assert "saddr $PEER_WEB_IP" not in inp
+    assert "saddr $PEER_DATA_IP" not in inp
+    # The node reaches out to the platform only: fleet API (:3080) and the
+    # audit outbox replay (:9428).
+    assert "daddr $PEER_PLATFORM_IP tcp dport { 3080, 9428 } accept" in out
+
+
+def test_firewall_platform_front_door_and_fleet_only():
+    inp = _chain_body(_firewall("platform.nft"), "input")
+    out = _chain_body(_firewall("platform.nft"), "output")
+    # User networks reach only 8443 (TLS) + 8080 (redirect).
+    assert "tcp dport 8443 accept" in inp
+    assert "tcp dport 8080 accept" in inp
+    # No inbound accept of the peer ports or of LiteLLM/Valkey.
+    for port in ("8000", "8001", "4000", "6379", "8333"):
+        assert f"dport {port}" not in inp
+    # GPU nodes reach the fleet API (:3080) and VictoriaLogs (:9428).
+    assert "saddr $FLEET_NET tcp dport 3080 accept" in inp
+    assert "saddr $FLEET_NET tcp dport 9428 accept" in inp
+    # Outbound goes only to the GPU fleet: inference traffic + fleet control.
+    assert "daddr $FLEET_NET tcp dport { 8000, 8001 } accept" in out
 
 
 def test_firewall_data_accepts_from_peers_only():
@@ -245,6 +291,37 @@ def test_connectivity_web_reports_unreachable_peer():
 def test_connectivity_all_and_data_have_no_required_peers():
     assert connectivity_check.check_role("all", {}) == []
     assert connectivity_check.check_role("data", {}) == []
+    assert connectivity_check.check_role("platform", {}) == []
+
+
+def test_connectivity_inference_reaches_platform_api_and_logs(fake_listener):
+    host, port = fake_listener
+    env = {
+        "ROLE": "inference",
+        "PLATFORM_URL": f"http://{host}:{port}",
+        "PEER_DATA_HOST": host,
+        "PEER_DATA_LOGS_PORT": str(port),
+    }
+    assert connectivity_check.check_role("inference", env) == []
+
+
+def test_connectivity_inference_reports_platform_api_target():
+    env = {
+        "ROLE": "inference",
+        "PLATFORM_URL": "https://10.0.0.20:3080",
+        "PEER_DATA_HOST": "10.0.0.20",
+        "PEER_DATA_LOGS_PORT": "9428",
+    }
+    targets = connectivity_check.required_targets("inference", env)
+    assert ("Platform fleet API (register/heartbeat)", "10.0.0.20", "3080") in targets
+    assert ("VictoriaLogs (platform)", "10.0.0.20", "9428") in targets
+
+
+def test_connectivity_inference_platform_url_without_port_defaults_to_3080():
+    env = {"ROLE": "inference", "PLATFORM_URL": "https://10.0.0.20"}
+    label, host, port = connectivity_check.platform_api_target(env)
+    assert host == "10.0.0.20"
+    assert port == "3080"
 
 
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,88 @@
+# Fleet alert rules — GPU inference tier (enterprise tier 1, spec §8.2).
+#
+# FORMAT: identical to the rule objects in backend/config/observability/alerts.json
+# (consumed by backend/services/observability/alerts.py): each rule has
+#   name, metric, labels, op (lt|le|gt|ge|eq|ne), threshold, for_seconds,
+#   severity (critical|warning), owner, runbook, summary.
+# A label value of "*" expands the rule per distinct label value (e.g. per node).
+#
+# WIRING: alerts.py currently loads backend/config/observability/alerts.json only.
+# Merge these rules into alerts.json to activate them:
+#   python3 -c "
+#   import json, yaml
+#   p='backend/config/observability/alerts.json'
+#   d=json.load(open(p)); f=yaml.safe_load(open('backend/config/observability/alerts-fleet.yml'))
+#   names={r['name'] for r in d['rules']}; d['rules']+=[r for r in f['rules'] if r['name'] not in names]
+#   json.dump(d, open(p,'w'), indent=2)"
+# (kept as a separate file so the fleet rules can be reviewed/owned independently;
+# see docs/runbooks/gpu-fleet.md § alerting for the metric sources the collector
+# must emit: observability_fleet_node_up, observability_fleet_node_heartbeat_age_seconds,
+# observability_fleet_model_healthy, observability_fleet_outbox_lag_seconds,
+# observability_fleet_vram_used_percent, observability_fleet_cert_expires_in_days.)
+
+rules:
+  - name: fleet_node_down
+    metric: observability_fleet_node_up
+    labels: {node: "*"}
+    op: lt
+    threshold: 1
+    for_seconds: 30
+    severity: critical
+    owner: owner-pending
+    runbook: gpu-fleet.md#node-down
+    summary: "GPU node {{node}} is down (3 missed heartbeats)"
+
+  - name: fleet_node_stale
+    metric: observability_fleet_node_heartbeat_age_seconds
+    labels: {node: "*"}
+    op: gt
+    threshold: 30
+    for_seconds: 60
+    severity: warning
+    owner: owner-pending
+    runbook: gpu-fleet.md#node-stale
+    summary: "GPU node {{node}} heartbeat stale for {{value}}s (excluded from model_list)"
+
+  - name: fleet_model_unhealthy
+    metric: observability_fleet_model_healthy
+    labels: {node: "*", model: "*"}
+    op: lt
+    threshold: 1
+    for_seconds: 60
+    severity: critical
+    owner: owner-pending
+    runbook: gpu-fleet.md#model-unhealthy
+    summary: "Model {{model}} unhealthy on GPU node {{node}}"
+
+  - name: fleet_audit_outbox_lag
+    metric: observability_fleet_outbox_lag_seconds
+    labels: {node: "*"}
+    op: gt
+    threshold: 60
+    for_seconds: 120
+    severity: warning
+    owner: owner-pending
+    runbook: gpu-fleet.md#outbox-lag
+    summary: "Audit outbox lag on {{node}} is {{value}}s (SLO: < 60s)"
+
+  - name: fleet_vram_high
+    metric: observability_fleet_vram_used_percent
+    labels: {node: "*", gpu: "*"}
+    op: gt
+    threshold: 90
+    for_seconds: 300
+    severity: warning
+    owner: owner-pending
+    runbook: gpu-fleet.md#vram-high
+    summary: "VRAM on {{node}} GPU {{gpu}} at {{value}}% (limit 90%)"
+
+  - name: fleet_cert_expiring
+    metric: observability_fleet_cert_expires_in_days
+    labels: {node: "*"}
+    op: lt
+    threshold: 30
+    for_seconds: 3600
+    severity: warning
+    owner: owner-pending
+    runbook: gpu-fleet.md#cert-rotation
+    summary: "Fleet certificate for {{node}} expires in {{value}} days"

@@ -22,12 +22,18 @@ if [ "${1:-}" = "--nvidia" ]; then
   exec python3 "${BACKEND_DIR}/scripts/nvidia_setup.py" "$@"
 fi
 if [ "${1:-}" = "--help" ]; then
-  echo "Usage: ./install.sh [--role all|web|inference|data] [--skip-vllm] [--vllm-version VERSION] [--peer-* ...]"
+  echo "Usage: ./install.sh [--role all|web|inference|data|platform] [--skip-vllm] [--vllm-version VERSION] [--peer-* ...]"
   echo "  --role all        one machine: every service, all binds loopback (default)"
-  echo "  --role web        application tier; needs --lan-bind-ip, --peer-inference, --peer-data"
-  echo "  --role inference  GPU tier (LiteLLM + engine); needs --lan-bind-ip, --peer-data"
-  echo "  --role data       state tier (Valkey, VictoriaLogs, SeaweedFS); needs --lan-bind-ip"
+  echo "  --role web        application tier; needs --lan-bind-ip, --peer-inference, --peer-data (compat, PR-H1)"
+  echo "  --role data       state tier (Valkey, VictoriaLogs, SeaweedFS); needs --lan-bind-ip (compat, PR-H1)"
+  echo "  --role inference  GPU node (inference engine + node-agent); needs --lan-bind-ip, --platform-url"
+  echo "  --role platform   data+admin tier (state, agent platform, LiteLLM, fleet control); needs --lan-bind-ip"
   echo "  --dry-run         resolve and validate the role, print the plan, change nothing"
+  echo "  --unattended      never prompt; fail closed when a required value is missing"
+  echo "  --platform-url    platform fleet API base URL (role inference), e.g. https://10.0.0.20:3080"
+  echo "  --node-name       fleet identity of this node (default: hostname)"
+  echo "  --peer-inference-hosts  comma-separated GPU bootstrap list (role platform, optional)"
+  echo "  --nvidia          install NVIDIA drivers on this host (role inference; extends the vLLM setup)"
   echo "  Without --role the role recorded in backend/config/roles/deployment.env is reused;"
   echo "  --role all switches a split host back to all-in-one. See docs/multi-host.md."
   echo "GPU setup: ./install.sh --nvidia [--apply] [--driver auto|BRANCH] [--cuda-toolkit MAJOR-MINOR]"
@@ -37,6 +43,8 @@ if [ "${1:-}" = "--help" ]; then
 fi
 SKIP_VLLM=0
 DRY_RUN=0
+UNATTENDED=0
+NVIDIA_SETUP=0
 VLLM_VERSION="${VLLM_VERSION:-}"
 
 # Check CLI flags
@@ -62,47 +70,67 @@ if [ "${1:-}" = "--tui" ] || [ "${1:-}" = "-i" ]; then
 fi
 
 # ---- Multi-host role flags (unattended; PR-H1) ------------------------------
-# The machine role is a three-way choice the operator makes at install time:
+# The machine role is the operator's topology choice at install time:
 #
 #   --role all        one machine, everything local, all binds loopback
 #   --role web        application tier (Traefik, ForwardAuth, agent platform,
-#                     sandbox, harness gateway, workspaces)
-#   --role inference  GPU tier (LiteLLM + inference engine + vLLM)
-#   --role data       state tier (Valkey, VictoriaLogs, SeaweedFS, backups)
+#                     sandbox, harness gateway, workspaces) — compat (PR-H1)
+#   --role data       state tier (Valkey, VictoriaLogs, SeaweedFS, backups) —
+#                     compat (PR-H1)
+#   --role inference  GPU node: inference engine + node-agent (fleet). Needs
+#                     --lan-bind-ip and --platform-url; secretless by design.
+#   --role platform   data+admin tier: Valkey, VictoriaLogs, SeaweedFS, agent
+#                     platform, LiteLLM (loopback), fleet control. Needs
+#                     --lan-bind-ip; GPU nodes register to it.
 #
 # Without --role the installer reuses the role recorded in
 # backend/config/roles/deployment.env, so ./update.sh (which calls the installer
 # with no flags) never silently re-roles a machine; with neither the flag nor a
 # recorded role the host is single-host (all). Passing --role all on a host that
-# was web/inference/data switches it back to all-in-one: the recorded peers are
-# reset to loopback, the role-dependent files are re-rendered to their
+# was web/inference/data/platform switches it back to all-in-one: the recorded
+# peers are reset to loopback, the role-dependent files are re-rendered to their
 # single-host form, and only then is anything installed.
 # The interactive TUI asks the same questions (installer_tui.py role step).
 ROLE=""
 LAN_BIND_IP=""
 PEER_INFERENCE_HOST=""
 PEER_INFERENCE_PORT=""
+PEER_INFERENCE_HOSTS=""
 PEER_DATA_HOST=""
 PEER_DATA_VALKEY_PORT=""
 PEER_DATA_LOGS_PORT=""
 PEER_DATA_SEAWEEDFS_PORT=""
+PLATFORM_URL=""
+NODE_NAME=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --skip-vllm) SKIP_VLLM=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    # --unattended asserts the non-interactive contract: this installer never
+    # prompts (a missing required value fails closed with exit 2), so the flag
+    # is a no-op here — it exists so fleet provisioning scripts can declare
+    # "no human will answer" explicitly. The TUI honours it with defaults.
+    --unattended) UNATTENDED=1; shift ;;
+    # --nvidia opts this host into the NVIDIA driver install (role inference).
+    # Kept as a flag here; the legacy first-argument form at the top of this
+    # script still execs nvidia_setup.py directly.
+    --nvidia) NVIDIA_SETUP=1; shift ;;
     --vllm-version) VLLM_VERSION="${2:?--vllm-version requires a version}"; shift 2 ;;
-    --role)                  ROLE="${2:?--role requires all|web|inference|data}"; shift 2 ;;
+    --role)                  ROLE="${2:?--role requires all|web|inference|data|platform}"; shift 2 ;;
     --lan-bind-ip)           LAN_BIND_IP="${2:?--lan-bind-ip requires an address}"; shift 2 ;;
     --peer-inference)        PEER_INFERENCE_HOST="${2:?--peer-inference requires an address}"; shift 2 ;;
     --peer-inference-port)   PEER_INFERENCE_PORT="${2:?--peer-inference-port requires a port}"; shift 2 ;;
+    --peer-inference-hosts)  PEER_INFERENCE_HOSTS="${2:?--peer-inference-hosts requires a comma-separated host list}"; shift 2 ;;
     --peer-data)             PEER_DATA_HOST="${2:?--peer-data requires an address}"; shift 2 ;;
     --peer-data-valkey-port)     PEER_DATA_VALKEY_PORT="${2:?--peer-data-valkey-port requires a port}"; shift 2 ;;
     --peer-data-logs-port)       PEER_DATA_LOGS_PORT="${2:?--peer-data-logs-port requires a port}"; shift 2 ;;
     --peer-data-seaweedfs-port)  PEER_DATA_SEAWEEDFS_PORT="${2:?--peer-data-seaweedfs-port requires a port}"; shift 2 ;;
+    --platform-url)          PLATFORM_URL="${2:?--platform-url requires a URL}"; shift 2 ;;
+    --node-name)             NODE_NAME="${2:?--node-name requires a name}"; shift 2 ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 [--role all|web|inference|data] [--peer-* ...] [--lan-bind-ip IP]" >&2
+      echo "Usage: $0 [--role all|web|inference|data|platform] [--peer-* ...] [--lan-bind-ip IP]" >&2
       exit 2
       ;;
   esac
@@ -147,16 +175,16 @@ if [ -z "$ROLE" ]; then
   if [ -n "$RECORDED_ROLE" ]; then
     ROLE="$RECORDED_ROLE"
     echo "  [i] Reusing the recorded machine role '${ROLE}' from ${DEPLOYMENT_ENV_FILE}."
-    echo "      Pass --role all|web|inference|data to change it."
+    echo "      Pass --role all|web|inference|data|platform to change it."
   else
     ROLE="all"
   fi
 fi
 
 case "$ROLE" in
-  all|web|inference|data) ;;
+  all|web|inference|data|platform) ;;
   *)
-    echo "Invalid role: ${ROLE} (expected all|web|inference|data)" >&2
+    echo "Invalid role: ${ROLE} (expected all|web|inference|data|platform)" >&2
     exit 2
     ;;
 esac
@@ -164,10 +192,13 @@ esac
 LAN_BIND_IP="$(resolve_value "$LAN_BIND_IP" "$(recorded_env LAN_BIND_IP)" "127.0.0.1")"
 PEER_INFERENCE_HOST="$(resolve_value "$PEER_INFERENCE_HOST" "$(recorded_env PEER_INFERENCE_HOST)" "127.0.0.1")"
 PEER_INFERENCE_PORT="$(resolve_value "$PEER_INFERENCE_PORT" "$(recorded_env PEER_INFERENCE_PORT)" "4000")"
+PEER_INFERENCE_HOSTS="$(resolve_value "$PEER_INFERENCE_HOSTS" "$(recorded_env PEER_INFERENCE_HOSTS)" "")"
 PEER_DATA_HOST="$(resolve_value "$PEER_DATA_HOST" "$(recorded_env PEER_DATA_HOST)" "127.0.0.1")"
 PEER_DATA_VALKEY_PORT="$(resolve_value "$PEER_DATA_VALKEY_PORT" "$(recorded_env PEER_DATA_VALKEY_PORT)" "6379")"
 PEER_DATA_LOGS_PORT="$(resolve_value "$PEER_DATA_LOGS_PORT" "$(recorded_env PEER_DATA_LOGS_PORT)" "9428")"
 PEER_DATA_SEAWEEDFS_PORT="$(resolve_value "$PEER_DATA_SEAWEEDFS_PORT" "$(recorded_env PEER_DATA_SEAWEEDFS_PORT)" "8333")"
+PLATFORM_URL="$(resolve_value "$PLATFORM_URL" "$(recorded_env PLATFORM_URL)" "")"
+NODE_NAME="$(resolve_value "$NODE_NAME" "$(recorded_env NODE_NAME)" "$(hostname 2>/dev/null || echo gpu-node)")"
 
 if [ "$ROLE" = "all" ]; then
   # Single host: every address is loopback, whatever an earlier role recorded.
@@ -176,10 +207,12 @@ if [ "$ROLE" = "all" ]; then
   LAN_BIND_IP="127.0.0.1"
   PEER_INFERENCE_HOST="127.0.0.1"
   PEER_INFERENCE_PORT="4000"
+  PEER_INFERENCE_HOSTS=""
   PEER_DATA_HOST="127.0.0.1"
   PEER_DATA_VALKEY_PORT="6379"
   PEER_DATA_LOGS_PORT="9428"
   PEER_DATA_SEAWEEDFS_PORT="8333"
+  PLATFORM_URL=""
 else
   # A split deployment talking to itself on loopback is the failure this
   # installer must not allow: peers would be unreachable, and on data Valkey
@@ -195,10 +228,22 @@ else
       fail_closed "Role 'web' needs the data host: pass --peer-data <ip>."
     fi
   elif [ "$ROLE" = "inference" ]; then
+    # The GPU node is secretless: its only peer is the platform (fleet API for
+    # register/heartbeat, VictoriaLogs for the audit outbox replay). The data
+    # host defaults to the platform URL's host — same machine in the reference
+    # topology — and --peer-data overrides it when they differ.
+    if [ -z "$PLATFORM_URL" ]; then
+      fail_closed "Role 'inference' needs the platform URL: pass --platform-url <url>."
+    fi
     if is_loopback_address "$PEER_DATA_HOST"; then
-      fail_closed "Role 'inference' needs the data host: pass --peer-data <ip>."
+      PEER_DATA_HOST="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlparse(sys.argv[1]).hostname or "")' "$PLATFORM_URL")"
+    fi
+    if is_loopback_address "$PEER_DATA_HOST"; then
+      fail_closed "Role 'inference' needs the platform (data) host: pass --peer-data <ip>."
     fi
   fi
+  # platform needs no peers: GPU nodes register to it (PEER_INFERENCE_HOSTS is
+  # an optional bootstrap list), and data needs none either.
 fi
 
 # Plan preview: resolve and validate the role, print what would happen, and
@@ -208,8 +253,21 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "  [i] Dry run: nothing is written, installed or started."
   echo "      role:        ${ROLE}"
   echo "      lan-bind-ip: ${LAN_BIND_IP}"
-  echo "      inference:   ${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}"
+  if [ "$ROLE" = "platform" ]; then
+    echo "      inference:   (fleet registry; bootstrap list below)"
+  elif [ "$ROLE" != "inference" ]; then
+    echo "      inference:   ${PEER_INFERENCE_HOST}:${PEER_INFERENCE_PORT}"
+  fi
   echo "      data:        ${PEER_DATA_HOST} (valkey ${PEER_DATA_VALKEY_PORT}, logs ${PEER_DATA_LOGS_PORT}, seaweedfs ${PEER_DATA_SEAWEEDFS_PORT})"
+  if [ -n "$PLATFORM_URL" ]; then
+    echo "      platform-url: ${PLATFORM_URL}"
+  fi
+  if [ -n "$NODE_NAME" ]; then
+    echo "      node-name:    ${NODE_NAME}"
+  fi
+  if [ -n "$PEER_INFERENCE_HOSTS" ]; then
+    echo "      inference-hosts (bootstrap): ${PEER_INFERENCE_HOSTS}"
+  fi
   if [ -x "${BACKEND_DIR}/platform.sh" ]; then
     echo "      services per role:"
     bash "${BACKEND_DIR}/platform.sh" roles 2>/dev/null || true
@@ -230,8 +288,10 @@ if [ "$ROLE" != "all" ]; then
   echo "  [i] Pre-apply connectivity check to required peer ports..."
   if ! ROLE="$ROLE" LAN_BIND_IP="$LAN_BIND_IP" \
        PEER_INFERENCE_HOST="$PEER_INFERENCE_HOST" PEER_INFERENCE_PORT="$PEER_INFERENCE_PORT" \
+       PEER_INFERENCE_HOSTS="$PEER_INFERENCE_HOSTS" \
        PEER_DATA_HOST="$PEER_DATA_HOST" PEER_DATA_VALKEY_PORT="$PEER_DATA_VALKEY_PORT" \
        PEER_DATA_LOGS_PORT="$PEER_DATA_LOGS_PORT" PEER_DATA_SEAWEEDFS_PORT="$PEER_DATA_SEAWEEDFS_PORT" \
+       PLATFORM_URL="$PLATFORM_URL" NODE_NAME="$NODE_NAME" \
        python3 "${CONFIG_DIR}/roles/connectivity_check.py"; then
     echo "  [!] Connectivity check failed; nothing was applied." >&2
     exit 1
@@ -241,16 +301,19 @@ fi
 # Record the decision (every role, including all) after the checks passed.
 mkdir -p "${CONFIG_DIR}/roles"
 cat > "$DEPLOYMENT_ENV_FILE" <<EOF
-# Generated by install.sh (PR-H1). Machine-specific; git-ignored.
+# Generated by install.sh (PR-H1; platform/inference roles: Phase B). Machine-specific; git-ignored.
 # Written for every role: ROLE=all means "one machine, everything loopback".
 ROLE=${ROLE}
 LAN_BIND_IP=${LAN_BIND_IP}
 PEER_INFERENCE_HOST=${PEER_INFERENCE_HOST}
 PEER_INFERENCE_PORT=${PEER_INFERENCE_PORT}
+PEER_INFERENCE_HOSTS=${PEER_INFERENCE_HOSTS}
 PEER_DATA_HOST=${PEER_DATA_HOST}
 PEER_DATA_VALKEY_PORT=${PEER_DATA_VALKEY_PORT}
 PEER_DATA_LOGS_PORT=${PEER_DATA_LOGS_PORT}
 PEER_DATA_SEAWEEDFS_PORT=${PEER_DATA_SEAWEEDFS_PORT}
+PLATFORM_URL=${PLATFORM_URL}
+NODE_NAME=${NODE_NAME}
 EOF
 echo "  [i] Wrote ${DEPLOYMENT_ENV_FILE} (role=${ROLE})"
 
@@ -277,10 +340,10 @@ mkdir -p "${BIN_DIR}" \
          "${CONFIG_DIR}"/{traefik,valkey,litellm,seaweedfs,victorialogs,sandbox,keys} \
          "${LOGS_DIR}" "${RUN_DIR}"
 
-# State directories are role-scoped: data hosts Valkey/SeaweedFS/VictoriaLogs,
-# web hosts the workspaces; `all` hosts both.
+# State directories are role-scoped: data and platform host Valkey/SeaweedFS/
+# VictoriaLogs, web hosts the workspaces; `all` hosts both.
 case "$ROLE" in
-  all|data)
+  all|data|platform)
     mkdir -p "${DATA_DIR}"/{valkey,seaweedfs,victorialogs,runbooks,logs}
     ;;
   *)
@@ -288,7 +351,7 @@ case "$ROLE" in
     ;;
 esac
 
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ]; then
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ] || [ "$ROLE" = "platform" ]; then
   # Per-user workspaces (sysadmin-01 to sysadmin-10) with 0700 permissions
   for i in $(seq -w 1 10); do
     mkdir -p "${DATA_DIR}/workspaces/sysadmin-${i}"
@@ -301,9 +364,9 @@ else
   echo "  [+] Initialized directories (role=${ROLE})."
 fi
 
-# 2. Bubblewrap Verification (sandbox runs on web only)
+# 2. Bubblewrap Verification (the sandbox runs where agent_tools runs)
 echo "[2/6] Verifying Linux Kernel Sandboxing (Bubblewrap)..."
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ]; then
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ] || [ "$ROLE" = "platform" ]; then
   if ! command -v bwrap >/dev/null 2>&1; then
     echo "  [!] bwrap not found in PATH. Checking /usr/bin/bwrap..."
     if [ -x "/usr/bin/bwrap" ]; then
@@ -317,14 +380,14 @@ if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ]; then
     echo "  [+] Bubblewrap available: $(which bwrap)"
   fi
 else
-  echo "  [i] Skipping Bubblewrap check (sandbox runs on web only)."
+  echo "  [i] Skipping Bubblewrap check (no sandbox on role=${ROLE})."
 fi
 
 # 3. Native Static Binaries (Zero Docker Daemon overhead)
 echo "[3/6] Installing native static Go & C binaries (role=${ROLE})..."
 
-# 3.1 Traefik (Reverse Proxy & ForwardAuth Router) — web/all only
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ]; then
+# 3.1 Traefik (Reverse Proxy & ForwardAuth Router) — web/all/platform only
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ] || [ "$ROLE" = "platform" ]; then
   if [ ! -x "${BIN_DIR}/traefik" ]; then
     echo "  [+] Downloading Traefik static binary..."
     TMP_TAR="/tmp/traefik_install.tar.gz"
@@ -337,11 +400,11 @@ if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ]; then
     echo "  [*] Traefik already installed in ${BIN_DIR}/traefik"
   fi
 else
-  echo "  [i] Skipping Traefik (web/all only)."
+  echo "  [i] Skipping Traefik (web/all/platform only)."
 fi
 
-# 3.2 VictoriaLogs (High-Efficiency Audit Logs Engine) — data/all only
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ]; then
+# 3.2 VictoriaLogs (High-Efficiency Audit Logs Engine) — data/all/platform only
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ] || [ "$ROLE" = "platform" ]; then
   if [ ! -x "${BIN_DIR}/victoria-logs-prod" ]; then
     echo "  [+] Downloading VictoriaLogs static binary..."
     TMP_TAR="/tmp/vl_install.tar.gz"
@@ -354,11 +417,11 @@ if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ]; then
     echo "  [*] VictoriaLogs already installed in ${BIN_DIR}/victoria-logs-prod"
   fi
 else
-  echo "  [i] Skipping VictoriaLogs (data/all only)."
+  echo "  [i] Skipping VictoriaLogs (data/all/platform only)."
 fi
 
-# 3.3 SeaweedFS (Local S3 Object Storage & Filer) — data/all only
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ]; then
+# 3.3 SeaweedFS (Local S3 Object Storage & Filer) — data/all/platform only
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ] || [ "$ROLE" = "platform" ]; then
   if [ ! -x "${BIN_DIR}/weed" ]; then
     echo "  [+] Downloading SeaweedFS static binary..."
     TMP_TAR="/tmp/weed_install.tar.gz"
@@ -371,15 +434,15 @@ if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ]; then
     echo "  [*] SeaweedFS already installed in ${BIN_DIR}/weed"
   fi
 else
-  echo "  [i] Skipping SeaweedFS (data/all only)."
+  echo "  [i] Skipping SeaweedFS (data/all/platform only)."
 fi
 
-# 3.4 Valkey (Memory Cache & Quotas) — data/all only
+# 3.4 Valkey (Memory Cache & Quotas) — data/all/platform only
 # Resolution order: PATH binary, Linuxbrew prefix, brew install, the official
 # prebuilt binary tarball from download.valkey.io (sha256-verified), then the
 # distro package manager (apt on Ubuntu/Debian, apk on Alpine). Whatever wins
 # must end up at ${BIN_DIR}/valkey-server because platform.sh uses that name.
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ]; then
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ] || [ "$ROLE" = "platform" ]; then
   if [ ! -x "${BIN_DIR}/valkey-server" ]; then
     echo "  [+] Locating or installing Valkey..."
     BREW_VALKEY="/home/linuxbrew/.linuxbrew/opt/valkey/bin/valkey-server"
@@ -437,10 +500,10 @@ if [ "$ROLE" = "all" ] || [ "$ROLE" = "data" ]; then
     echo "  [*] Valkey already installed in ${BIN_DIR}/valkey-server"
   fi
 else
-  echo "  [i] Skipping Valkey (data/all only)."
+  echo "  [i] Skipping Valkey (data/all/platform only)."
 fi
 
-# 4. Python Virtual Environment & Lightweight Services (web/inference/all only)
+# 4. Python Virtual Environment & Lightweight Services (all roles except data)
 echo "[4/6] Setting up Python virtual environment and dependencies..."
 if [ "$ROLE" = "data" ]; then
   echo "  [i] Skipping Python venv (data runs only static binaries)."
@@ -456,6 +519,17 @@ else
     "litellm[proxy]" fastapi uvicorn httpx pyyaml redis pydantic huggingface_hub
   echo "  [+] Python dependencies verified."
   if { [ "$ROLE" = "all" ] || [ "$ROLE" = "inference" ]; } && [ "$SKIP_VLLM" = 0 ]; then
+    if [ "$NVIDIA_SETUP" = 1 ]; then
+      echo "  [+] Installing NVIDIA drivers (--nvidia)..."
+      # Explicit operator opt-in: driver install needs sudo and a reboot may
+      # follow. Fail closed when the setup script reports a problem.
+      if ! python3 "${BACKEND_DIR}/scripts/nvidia_setup.py" --apply; then
+        echo "  [!] NVIDIA driver setup failed; not continuing to the vLLM install." >&2
+        exit 1
+      fi
+    else
+      echo "  [i] Skipping NVIDIA driver install (pass --nvidia to install drivers)."
+    fi
     echo "  [+] Installing vLLM in an isolated Python 3.12 environment..."
     # vLLM bundles compiled CUDA/PyTorch components; keep them separate from
     # the platform's service environment to avoid dependency conflicts.
@@ -513,21 +587,39 @@ python3 "${CONFIG_DIR}/roles/render_config.py" "${CONFIG_DIR}/roles/deployment.e
 ln -sf "backend/platform.sh" "${SCRIPT_DIR}/platform.sh"
 chmod +x "${SCRIPT_DIR}/platform.sh"
 
-# 6. Provision Keys (web/all only; inference/data copy keys from W)
+# 6. Provision Keys (all/web/platform only; data copies valkey-password from
+# the platform host; inference is secretless by design)
 echo "[6/6] Provisioning Sysadmin API keys (10 users + P1 bypass)..."
-if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ]; then
+if [ "$ROLE" = "all" ] || [ "$ROLE" = "web" ] || [ "$ROLE" = "platform" ]; then
   "${BACKEND_DIR}/config/keys/provision-keys.sh"
   "${VENV_PYTHON}" "${BACKEND_DIR}/config/keys/provision-logins.py"
+elif [ "$ROLE" = "data" ]; then
+  echo "  [i] Keys are provisioned on the application host (web/platform role) only."
+  echo "      Copy valkey-password.key over a secure channel (scp/rsync over SSH)"
+  echo "      and verify permissions (0600). See docs/multi-host.md (key-copy)."
 else
-  echo "  [i] Keys are provisioned on the WEB host only. Copy them from W over a"
-  echo "      secure channel (scp/rsync over SSH) and verify permissions (0600)."
-  if [ "$ROLE" = "inference" ]; then
-    echo "      inference needs:  master.key, sysadmin-*.key, emergency-p1.key,"
-    echo "                        valkey-password.key"
-  elif [ "$ROLE" = "data" ]; then
-    echo "      data needs:       valkey-password.key"
+  echo "  [i] No keys are provisioned on role '${ROLE}': a GPU node is secretless by"
+  echo "      design — node identity comes from its fleet client certificate (below),"
+  echo "      not from user keys."
+fi
+
+# 6b. Fleet node identity (platform/inference). The CA script is owned by the
+# fleet worker; until it lands, warn instead of failing so the install can
+# still complete and the operator can issue the certificate by hand.
+if [ "$ROLE" = "platform" ] || [ "$ROLE" = "inference" ]; then
+  echo "  [+] Provisioning fleet node identity (node '${NODE_NAME}')..."
+  FLEET_CA="${BACKEND_DIR}/services/resilience/fleet-ca.sh"
+  if [ -x "$FLEET_CA" ]; then
+    if ! "$FLEET_CA" issue-node "$NODE_NAME"; then
+      echo "  [!] fleet-ca.sh issue-node failed for '${NODE_NAME}'." >&2
+      echo "      The node cannot register until its client certificate is issued." >&2
+      exit 1
+    fi
+  else
+    echo "  [!] ${FLEET_CA} not installed yet (fleet work in progress)."
+    echo "      Issue the node certificate manually before the node registers:"
+    echo "        backend/services/resilience/fleet-ca.sh issue-node ${NODE_NAME}"
   fi
-  echo "      See docs/multi-host.md (key-copy and revocation)."
 fi
 
 echo "--------------------------------------------------------------------"
@@ -536,6 +628,13 @@ echo " Machine role: ${ROLE}"
 if [ "$ROLE" != "all" ]; then
   echo "   This host runs only the '${ROLE}' services."
   echo "   Switch to a single machine later with: ./install.sh --role all"
+fi
+if [ "$ROLE" = "inference" ]; then
+  echo "   GPU node '${NODE_NAME}': start with ./platform.sh start, then approve it"
+  echo "   in the fleet admin UI. It registers to ${PLATFORM_URL}."
+fi
+if [ "$ROLE" = "platform" ]; then
+  echo "   Fleet control plane: GPU nodes register to this host's :3080 fleet API."
 fi
 echo "--------------------------------------------------------------------"
 echo " Usage Commands:"
